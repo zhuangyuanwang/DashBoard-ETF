@@ -52,6 +52,9 @@ BACKTEST_PERIODS = {
     "10 Years": 10,
 }
 
+REBALANCE_FREQUENCIES = ["Daily", "Weekly", "Monthly"]
+SIGNAL_AGGREGATION_WINDOWS = [5, 10, 20, 30]
+
 
 def get_all_etf_symbols():
     symbols = []
@@ -1302,6 +1305,342 @@ def render_hypothetical_portfolio_tracker(portfolio_df, tracker_metrics):
     )
 
 
+def pick_rebalance_dates(signal_history, frequency):
+    if signal_history.empty:
+        return []
+    if frequency == "Daily":
+        return signal_history.index.tolist()
+    if frequency == "Weekly":
+        return signal_history.resample("W-FRI").last().dropna(how="all").index.tolist()
+    return signal_history.resample("ME").last().dropna(how="all").index.tolist()
+
+
+def get_signal_counts(window_df):
+    return {
+        "BUY": int((window_df["Combined Signal"] == "BUY").sum()),
+        "HOLD": int((window_df["Combined Signal"] == "HOLD").sum()),
+        "RISK-OFF": int(window_df["Combined Signal"].isin(["RISK-OFF", "CASH", "SELL"]).sum()),
+    }
+
+
+def get_most_frequent_selected_asset(window_df, close_columns):
+    candidates = window_df["Selected ETF"].dropna().astype(str)
+    expanded = []
+    for value in candidates:
+        for asset in value.split(","):
+            asset = asset.strip()
+            if asset in close_columns and asset not in ["Cash", "SHY", "IEF", "TLT"]:
+                expanded.append(asset)
+    if not expanded:
+        return "SPY" if "SPY" in close_columns else close_columns[0]
+    return pd.Series(expanded).value_counts().index[0]
+
+
+def get_defensive_allocation(close_columns):
+    for asset in ["SHY", "IEF", "TLT"]:
+        if asset in close_columns:
+            return asset
+    return "Cash"
+
+
+def build_daily_signal_history(close, ma_symbol="SPY"):
+    rows = []
+    indicators = calculate_indicators(close)
+    momentum_scores = calculate_momentum_scores(indicators)
+    start_index = min(252, max(0, len(close) - 1))
+    for date in close.index[start_index:]:
+        strategy_signals = {}
+        signal_date = date
+
+        score_row = momentum_scores.loc[date].dropna() if date in momentum_scores.index else pd.Series(dtype=float)
+        if not score_row.empty:
+            selected = score_row.sort_values(ascending=False).index[0]
+            vote = 1 if score_row[selected] > 0 else 0
+            strategy_signals["Momentum Rotation"] = make_signal("Momentum Rotation", signal_date, selected, "BUY" if vote == 1 else "HOLD", 50, "Daily weighted momentum score.", vote)
+
+        symbol = ma_symbol if ma_symbol in close.columns else close.columns[0]
+        if symbol in close.columns:
+            price = close.at[date, symbol]
+            ma50 = indicators["ma50"].at[date, symbol] if symbol in indicators["ma50"].columns else np.nan
+            ma200 = indicators["ma200"].at[date, symbol] if symbol in indicators["ma200"].columns else np.nan
+            if pd.notna(price) and pd.notna(ma50) and pd.notna(ma200):
+                passed = sum([price > ma50, price > ma200, ma50 > ma200])
+                signal = "BUY" if passed == 3 else "HOLD" if passed >= 2 else "CASH"
+                vote = 1 if signal == "BUY" else 0 if signal == "HOLD" else -1
+                strategy_signals["Moving Average Trend Following"] = make_signal("Moving Average Trend Following", signal_date, symbol, signal, passed / 3 * 100, "Daily MA50/MA200 trend conditions.", vote)
+
+        ret12 = indicators["returns_12m"].loc[date].dropna()
+        if not ret12.empty:
+            selected = ret12.sort_values(ascending=False).index[0]
+            signal = "BUY" if ret12[selected] > 0 else "RISK-OFF"
+            strategy_signals["Dual Momentum"] = make_signal("Dual Momentum", signal_date, selected if signal == "BUY" else get_defensive_allocation(close.columns), signal, 50, "Daily relative and absolute momentum check.", 1 if signal == "BUY" else -1)
+
+        vol60 = indicators["vol60"].loc[date].dropna()
+        ret3 = indicators["returns_3m"].loc[date].dropna()
+        if not vol60.empty:
+            eligible = ret3[ret3 > 0].index.intersection(vol60.index)
+            ranked = vol60.loc[eligible].sort_values() if len(eligible) else vol60.sort_values()
+            selected = ranked.index[0]
+            signal = "BUY" if selected in eligible else "HOLD"
+            strategy_signals["Low Volatility Rotation"] = make_signal("Low Volatility Rotation", signal_date, selected, signal, 50, "Daily low-volatility ranking.", 1 if signal == "BUY" else 0)
+
+        if "SPY" in close.columns:
+            spy_price = close.at[date, "SPY"]
+            spy_ma50 = indicators["ma50"].at[date, "SPY"] if "SPY" in indicators["ma50"].columns else np.nan
+            spy_ma200 = indicators["ma200"].at[date, "SPY"] if "SPY" in indicators["ma200"].columns else np.nan
+            spy_vol20 = indicators["vol20"].at[date, "SPY"] if "SPY" in indicators["vol20"].columns else np.nan
+            if pd.notna(spy_price) and pd.notna(spy_ma50) and pd.notna(spy_ma200):
+                risk_off_count = sum([spy_price < spy_ma50, spy_price < spy_ma200, spy_ma50 < spy_ma200])
+                defensive_asset = get_defensive_allocation(close.columns)
+                defensive_signal = "RISK-OFF" if risk_off_count >= 2 else "BUY" if risk_off_count == 0 else "HOLD"
+                strategy_signals["Defensive Rotation Strategy"] = make_signal("Defensive Rotation Strategy", signal_date, defensive_asset if risk_off_count >= 2 else "SPY", defensive_signal, risk_off_count / 3 * 100, "Daily SPY defensive regime check.", -1 if defensive_signal == "RISK-OFF" else 1 if defensive_signal == "BUY" else 0)
+
+                regime_signal = "BUY" if spy_price > spy_ma50 and spy_price > spy_ma200 else "RISK-OFF" if spy_price < spy_ma50 and spy_price < spy_ma200 else "HOLD"
+                strategy_signals["Risk-On / Risk-Off Regime Strategy"] = make_signal("Risk-On / Risk-Off Regime Strategy", signal_date, "SPY" if regime_signal != "RISK-OFF" else defensive_asset, regime_signal, 50, "Daily SPY trend regime check.", 1 if regime_signal == "BUY" else -1 if regime_signal == "RISK-OFF" else 0)
+
+                if pd.notna(spy_vol20):
+                    vol_signal = "BUY" if spy_vol20 <= 0.15 and spy_price > spy_ma200 else "RISK-OFF" if spy_vol20 >= 0.25 or spy_price <= spy_ma200 else "HOLD"
+                    strategy_signals["Volatility Target Strategy"] = make_signal("Volatility Target Strategy", signal_date, "SPY" if vol_signal != "RISK-OFF" else defensive_asset, vol_signal, 50, "Daily volatility target check.", 1 if vol_signal == "BUY" else -1 if vol_signal == "RISK-OFF" else 0)
+
+        latest_close = close.loc[date].dropna()
+        high55 = indicators["rolling_high_55"].loc[date].dropna()
+        low20 = indicators["rolling_low_20"].loc[date].dropna()
+        common_high = latest_close.index.intersection(high55.index)
+        if len(common_high):
+            breakout = (latest_close[common_high] / high55[common_high] - 1).dropna()
+            selected = breakout.sort_values(ascending=False).index[0]
+            if breakout[selected] > 0:
+                strategy_signals["Breakout Strategy"] = make_signal("Breakout Strategy", signal_date, selected, "BUY", 50, "Daily 55-day breakout check.", 1)
+            else:
+                common_low = latest_close.index.intersection(low20.index)
+                breakdown = (latest_close[common_low] / low20[common_low] - 1).dropna() if len(common_low) else pd.Series(dtype=float)
+                signal = "CASH" if not breakdown.empty and breakdown.min() < 0 else "HOLD"
+                strategy_signals["Breakout Strategy"] = make_signal("Breakout Strategy", signal_date, "Cash" if signal == "CASH" else selected, signal, 50, "Daily breakout/breakdown check.", -1 if signal == "CASH" else 0)
+
+        rsi = indicators["rsi14"].loc[date].dropna()
+        ma200_row = indicators["ma200"].loc[date].dropna()
+        common = latest_close.index.intersection(rsi.index).intersection(ma200_row.index)
+        if len(common):
+            healthy = latest_close[common] > ma200_row[common]
+            oversold = rsi[common] < 30
+            if (healthy & oversold).any():
+                selected = rsi[common][healthy & oversold].sort_values().index[0]
+                strategy_signals["Mean Reversion Strategy"] = make_signal("Mean Reversion Strategy", signal_date, selected, "BUY", 50, "Daily oversold RSI with healthy trend.", 1)
+            else:
+                cash_signal = (rsi[common] > 70).any() or (~healthy).mean() > 0.5
+                strategy_signals["Mean Reversion Strategy"] = make_signal("Mean Reversion Strategy", signal_date, "Cash" if cash_signal else common[0], "CASH" if cash_signal else "HOLD", 50, "Daily RSI mean-reversion check.", -1 if cash_signal else 0)
+
+        ma50_row = indicators["ma50"].loc[date].dropna()
+        common = latest_close.index.intersection(ma50_row.index).intersection(ma200_row.index)
+        if len(common):
+            passing = latest_close[common][(latest_close[common] > ma50_row[common]) & (latest_close[common] > ma200_row[common])].index.tolist()
+            strength = len(passing) / len(common) * 100
+            signal = "BUY" if len(passing) >= max(3, len(common) * 0.4) else "HOLD" if passing else "RISK-OFF"
+            strategy_signals["Equal Weight Multi-ETF Strategy"] = make_signal("Equal Weight Multi-ETF Strategy", signal_date, ", ".join(passing[:6]) if passing else get_defensive_allocation(close.columns), signal, strength, "Daily equal-weight trend filter breadth.", 1 if signal == "BUY" else -1 if signal == "RISK-OFF" else 0)
+
+        for strategy_type in STRATEGY_TYPES:
+            if strategy_type not in strategy_signals:
+                strategy_signals[strategy_type] = make_signal(strategy_type, signal_date, "Cash", "HOLD", 0, "Not enough data for this daily signal.", 0)
+
+        combined_signal = combine_strategy_signals(strategy_signals)
+        votes = [signal["Vote"] for signal in strategy_signals.values()]
+        rows.append(
+            {
+                "Date": date,
+                "Combined Signal Score": np.mean(votes) if votes else np.nan,
+                "Combined Signal": combined_signal["Signal"],
+                "Selected ETF": combined_signal["Selected Asset"],
+                "BUY Votes": sum(1 for vote in votes if vote == 1),
+                "HOLD Votes": sum(1 for vote in votes if vote == 0),
+                "RISK-OFF Votes": sum(1 for vote in votes if vote == -1),
+            }
+        )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).set_index("Date")
+
+
+def calculate_win_rate(returns):
+    if returns.empty:
+        return np.nan
+    return (returns > 0).mean()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def backtest_recommendation_framework(
+    close,
+    rebalance_frequency,
+    signal_window,
+    initial_value,
+    benchmark_symbol="SPY",
+    transaction_cost=0.0005,
+    ma_symbol="SPY",
+):
+    signal_history = build_daily_signal_history(close, ma_symbol=ma_symbol)
+    daily_returns = close.pct_change().dropna()
+    if signal_history.empty or daily_returns.empty or benchmark_symbol not in daily_returns.columns:
+        return pd.DataFrame(), signal_history, pd.DataFrame(), {}
+
+    rebalance_dates = pick_rebalance_dates(signal_history, rebalance_frequency)
+    portfolio_value = initial_value
+    current_allocation = "Cash"
+    portfolio_rows = []
+    rebalance_rows = []
+
+    for idx, rebalance_date in enumerate(rebalance_dates):
+        actual_rebalance_date = latest_valid_date(signal_history, rebalance_date)
+        if actual_rebalance_date is None:
+            continue
+        window_df = signal_history.loc[:actual_rebalance_date].tail(signal_window)
+        if window_df.empty:
+            continue
+
+        average_score = window_df["Combined Signal Score"].mean()
+        counts = get_signal_counts(window_df)
+        if average_score >= 0.3:
+            recommended_allocation = get_most_frequent_selected_asset(window_df, close.columns)
+        elif average_score <= -0.3:
+            recommended_allocation = get_defensive_allocation(close.columns)
+        else:
+            recommended_allocation = current_allocation
+
+        trade_date = get_next_trade_date(daily_returns, actual_rebalance_date)
+        next_rebalance_date = rebalance_dates[idx + 1] if idx + 1 < len(rebalance_dates) else daily_returns.index[-1]
+        period_mask = (daily_returns.index >= trade_date) & (daily_returns.index <= next_rebalance_date)
+        period_returns = daily_returns.loc[period_mask]
+        if period_returns.empty:
+            continue
+
+        turnover = 0 if recommended_allocation == current_allocation else 1
+        for day_index, (date, return_row) in enumerate(period_returns.iterrows()):
+            if recommended_allocation in return_row.index:
+                day_return = return_row[recommended_allocation]
+                portfolio_weight = 1.0
+                cash_balance = 0.0
+            else:
+                day_return = 0.0
+                portfolio_weight = 0.0
+                cash_balance = portfolio_value
+
+            if day_index == 0 and turnover > 0:
+                day_return -= transaction_cost
+
+            portfolio_value *= 1 + day_return
+            signal_row = signal_history.loc[actual_rebalance_date]
+            portfolio_rows.append(
+                {
+                    "Date": date,
+                    "Combined Signal": signal_row["Combined Signal"],
+                    "Held Asset": recommended_allocation,
+                    "Portfolio Value": portfolio_value,
+                    "Daily Return": day_return,
+                    "Cumulative Return": portfolio_value / initial_value - 1,
+                    "Cash Balance": cash_balance,
+                    "Portfolio Weight": portfolio_weight,
+                    "Cash / Allocation": "Cash" if recommended_allocation == "Cash" else f"100% {recommended_allocation}",
+                }
+            )
+
+        current_allocation = recommended_allocation
+        rebalance_rows.append(
+            {
+                "Rebalance Date": actual_rebalance_date,
+                "Lookback Window": signal_window,
+                "Average Signal Score": average_score,
+                "BUY Count": counts["BUY"],
+                "HOLD Count": counts["HOLD"],
+                "RISK-OFF Count": counts["RISK-OFF"],
+                "Recommended Allocation": recommended_allocation,
+                "Executed Trade Date": trade_date,
+                "Portfolio Value": portfolio_value,
+            }
+        )
+
+    portfolio_df = pd.DataFrame(portfolio_rows)
+    rebalance_history = pd.DataFrame(rebalance_rows)
+    if portfolio_df.empty:
+        return portfolio_df, signal_history, rebalance_history, {}
+
+    portfolio_df = portfolio_df.drop_duplicates(subset=["Date"], keep="last").set_index("Date")
+    benchmark_returns = daily_returns[benchmark_symbol].reindex(portfolio_df.index).fillna(0)
+    portfolio_df["Benchmark Value"] = initial_value * (1 + benchmark_returns).cumprod()
+    portfolio_df["Excess Return vs Benchmark"] = (
+        portfolio_df["Portfolio Value"] / initial_value - 1
+    ) - (portfolio_df["Benchmark Value"] / initial_value - 1)
+
+    portfolio_returns = portfolio_df["Portfolio Value"].pct_change().dropna()
+    portfolio_equity = portfolio_df["Portfolio Value"] / initial_value
+    metrics = calculate_performance_metrics(portfolio_equity, portfolio_returns, len(rebalance_history))
+    metrics["annualized_return"] = metrics["cagr"]
+    metrics["win_rate"] = calculate_win_rate(portfolio_returns)
+    metrics["benchmark_return"] = portfolio_df["Benchmark Value"].iloc[-1] / initial_value - 1
+    metrics["current_allocation"] = portfolio_df["Held Asset"].iloc[-1]
+    latest_signal_row = signal_history.iloc[-1]
+    metrics["latest_recommendation"] = latest_signal_row["Combined Signal"]
+    recent_window = signal_history.tail(signal_window)
+    metrics["recent_counts"] = get_signal_counts(recent_window)
+    return portfolio_df, signal_history, rebalance_history, metrics
+
+
+def render_recommendation_framework_backtest(portfolio_df, signal_history, rebalance_history, metrics, benchmark_symbol):
+    st.subheader("Recommendation Framework Backtest")
+    st.write(
+        "Daily signals are generated for monitoring and stored as signal history. Portfolio trades only occur on the selected rebalance schedule. "
+        "The recommendation framework uses recent signal history, not just a single day's signal."
+    )
+    if portfolio_df.empty:
+        st.warning("Recommendation framework backtest is unavailable for the current data.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Annualized Return", f"{metrics['annualized_return'] * 100:.2f}%")
+    c2.metric("Cumulative Return", f"{metrics['total_return'] * 100:.2f}%")
+    c3.metric("Sharpe Ratio", f"{metrics['sharpe']:.2f}")
+    c4.metric("Max Drawdown", f"{metrics['max_drawdown'] * 100:.2f}%")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Win Rate", f"{metrics['win_rate'] * 100:.2f}%")
+    c6.metric("Number of Rebalances", str(metrics["number_rebalances"]))
+    c7.metric("Current Allocation", metrics["current_allocation"])
+    c8.metric("Latest Recommendation", metrics["latest_recommendation"])
+
+    recent_counts = metrics["recent_counts"]
+    st.write(
+        f"**Recent signal breakdown:** BUY {recent_counts['BUY']} | HOLD {recent_counts['HOLD']} | RISK-OFF {recent_counts['RISK-OFF']}"
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=portfolio_df.index, y=portfolio_df["Portfolio Value"], name="Recommendation Portfolio", line=dict(width=2)))
+    fig.add_trace(go.Scatter(x=portfolio_df.index, y=portfolio_df["Benchmark Value"], name=f"{benchmark_symbol} Benchmark", line=dict(width=2, dash="dash")))
+    fig.update_layout(
+        title="Recommendation Framework Portfolio vs Benchmark",
+        xaxis_title="Date",
+        yaxis_title="Portfolio Value ($)",
+        template="plotly_white",
+        margin=dict(l=10, r=10, t=40, b=30),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Signal History")
+    st.dataframe(
+        signal_history.reset_index().tail(120).style.format({"Combined Signal Score": "{:.2f}"}),
+        use_container_width=True,
+    )
+
+    st.subheader("Rebalance History")
+    if rebalance_history.empty:
+        st.warning("No rebalance history is available.")
+    else:
+        st.dataframe(
+            rebalance_history.tail(60).style.format(
+                {
+                    "Average Signal Score": "{:.2f}",
+                    "Portfolio Value": "${:,.2f}",
+                }
+            ),
+            use_container_width=True,
+        )
+
+
 def render_strategy_results(result):
     if "signal" in result:
         render_signal_card(result["signal"])
@@ -1528,6 +1867,10 @@ def main():
     ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
     summary_strategy = st.sidebar.selectbox("Top Summary Strategy", STRATEGY_TYPES, index=0)
     backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
+    rebalance_frequency = st.sidebar.selectbox("Rebalance Frequency", REBALANCE_FREQUENCIES, index=2)
+    signal_window = st.sidebar.selectbox("Signal Aggregation Window", SIGNAL_AGGREGATION_WINDOWS, index=2)
+    initial_portfolio_value = st.sidebar.number_input("Initial Portfolio Value", min_value=10000, value=1000000, step=50000)
+    benchmark_symbol = st.sidebar.selectbox("Benchmark", all_etf_symbols, index=ma_default_index)
     transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps)", min_value=0, max_value=100, value=5, step=1)
     transaction_cost = transaction_cost_bps / 10000
     st.sidebar.markdown("---")
@@ -1631,7 +1974,7 @@ def main():
 
         backtest_end = pd.Timestamp.today().normalize()
         backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
-        required_strategy_symbols = {"SPY", "SHY", ma_symbol} | set(DEFENSIVE_ETFS)
+        required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
         backtest_symbols = tuple(sorted(set(selected_tickers) | required_strategy_symbols))
 
         with st.spinner("Downloading backtest price data..."):
@@ -1665,12 +2008,23 @@ def main():
                 render_top_strategy_summary(available_results[summary_strategy])
 
             render_combined_signal_section(combined_signal, comparison_results)
-            portfolio_df, tracker_metrics = build_hypothetical_portfolio_tracker(
-                backtest_close,
-                transaction_cost=transaction_cost,
-                ma_symbol=ma_symbol,
+            with st.spinner("Backtesting recommendation framework..."):
+                recommendation_portfolio, signal_history, rebalance_history, recommendation_metrics = backtest_recommendation_framework(
+                    backtest_close,
+                    rebalance_frequency,
+                    signal_window,
+                    initial_portfolio_value,
+                    benchmark_symbol=benchmark_symbol,
+                    transaction_cost=transaction_cost,
+                    ma_symbol=ma_symbol,
+                )
+            render_recommendation_framework_backtest(
+                recommendation_portfolio,
+                signal_history,
+                rebalance_history,
+                recommendation_metrics,
+                benchmark_symbol,
             )
-            render_hypothetical_portfolio_tracker(portfolio_df, tracker_metrics)
             st.divider()
 
             strategy_tabs = st.tabs(STRATEGY_TYPES)
