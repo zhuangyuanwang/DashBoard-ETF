@@ -1104,6 +1104,204 @@ def render_combined_signal_section(combined_signal, results):
         )
 
 
+def select_asset_for_combined_signal(signal, close_columns):
+    if signal["Signal"] == "BUY":
+        candidates = [asset.strip() for asset in str(signal["Selected Asset"]).split(",")]
+        for asset in candidates:
+            if asset in close_columns:
+                return asset
+        if "SPY" in close_columns:
+            return "SPY"
+    if signal["Signal"] in ["RISK-OFF", "CASH", "SELL"]:
+        for asset in ["SHY", "IEF", "TLT"]:
+            if asset in close_columns:
+                return asset
+    return "Cash"
+
+
+def build_hypothetical_portfolio_tracker(close, transaction_cost=0.0005, ma_symbol="SPY", starting_value=1_000_000):
+    daily_returns = close.pct_change().dropna()
+    if daily_returns.empty or "SPY" not in daily_returns.columns:
+        return pd.DataFrame(), {}
+
+    month_ends = close.resample("ME").last().index
+    portfolio_value = starting_value
+    previous_asset = "Cash"
+    rows = []
+
+    for idx in range(12, len(month_ends) - 1):
+        signal_date = latest_valid_date(close, month_ends[idx])
+        if signal_date is None:
+            continue
+
+        history = close.loc[:signal_date]
+        strategy_signals = generate_all_strategy_signals(history, ma_symbol=ma_symbol)
+        combined_signal = combine_strategy_signals(strategy_signals)
+        target_asset = select_asset_for_combined_signal(combined_signal, close.columns)
+
+        if combined_signal["Signal"] == "HOLD":
+            held_asset = previous_asset
+        else:
+            held_asset = target_asset
+
+        next_rebalance_date = month_ends[idx + 1]
+        period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_rebalance_date)
+        period_returns = daily_returns.loc[period_mask]
+        if period_returns.empty:
+            continue
+
+        turnover = 0 if held_asset == previous_asset else 1
+        for day_index, (date, return_row) in enumerate(period_returns.iterrows()):
+            if held_asset in return_row.index:
+                daily_return = return_row[held_asset]
+                cash_balance = 0
+                portfolio_weight = 1.0
+            else:
+                daily_return = 0.0
+                cash_balance = portfolio_value
+                portfolio_weight = 0.0
+
+            if day_index == 0 and turnover > 0:
+                daily_return -= turnover * transaction_cost
+
+            portfolio_value *= 1 + daily_return
+            rows.append(
+                {
+                    "Date": date,
+                    "Combined Signal": combined_signal["Signal"],
+                    "Held Asset": held_asset,
+                    "Portfolio Value": portfolio_value,
+                    "Daily Return": daily_return,
+                    "Cumulative Return": portfolio_value / starting_value - 1,
+                    "Cash Balance": cash_balance if held_asset == "Cash" else 0,
+                    "Portfolio Weight": portfolio_weight,
+                    "Cash / Allocation": "Cash" if held_asset == "Cash" else f"100% {held_asset}",
+                    "Signal Date": combined_signal["Latest Signal Date"],
+                }
+            )
+
+        previous_asset = held_asset
+
+    portfolio_df = pd.DataFrame(rows)
+    if portfolio_df.empty:
+        return portfolio_df, {}
+
+    portfolio_df = portfolio_df.set_index("Date")
+    spy_returns = daily_returns["SPY"].reindex(portfolio_df.index).fillna(0)
+    portfolio_df["Benchmark SPY Value"] = starting_value * (1 + spy_returns).cumprod()
+    portfolio_df["Excess Return vs SPY"] = (
+        portfolio_df["Portfolio Value"] / starting_value - 1
+    ) - (portfolio_df["Benchmark SPY Value"] / starting_value - 1)
+
+    tracker_returns = portfolio_df["Portfolio Value"].pct_change().dropna()
+    tracker_equity = portfolio_df["Portfolio Value"] / starting_value
+    tracker_metrics = calculate_performance_metrics(tracker_equity, tracker_returns, portfolio_df["Signal Date"].nunique())
+    tracker_metrics["spy_total_return"] = portfolio_df["Benchmark SPY Value"].iloc[-1] / starting_value - 1
+    tracker_metrics["ending_value"] = portfolio_df["Portfolio Value"].iloc[-1]
+    tracker_metrics["current_holding"] = portfolio_df["Held Asset"].iloc[-1]
+    return portfolio_df, tracker_metrics
+
+
+def render_workflow_diagram():
+    st.subheader("Workflow Diagram")
+    labels = [
+        "Market Data Inputs",
+        "Data Processing",
+        "Strategy Models",
+        "Signal Generation",
+        "Combined Signal",
+        "Portfolio Allocation",
+        "Performance Tracking",
+        "Dashboard Output",
+    ]
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                node=dict(label=labels, pad=18, thickness=18),
+                link=dict(
+                    source=list(range(len(labels) - 1)),
+                    target=list(range(1, len(labels))),
+                    value=[1] * (len(labels) - 1),
+                ),
+            )
+        ]
+    )
+    fig.update_layout(
+        title="Market Data Inputs -> Data Processing -> Strategy Models -> Signal Generation -> Combined Signal -> Portfolio Allocation -> Performance Tracking -> Dashboard Output",
+        height=360,
+        margin=dict(l=10, r=10, t=50, b=10),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_hypothetical_portfolio_tracker(portfolio_df, tracker_metrics):
+    st.subheader("Hypothetical $1MM Portfolio Tracker")
+    st.write(
+        "This is a hypothetical model portfolio for tracking strategy behavior over time. It is not a live investment account."
+    )
+    if portfolio_df.empty:
+        st.warning("Hypothetical portfolio tracker is unavailable for the current data.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Portfolio Value", f"${tracker_metrics['ending_value']:,.0f}")
+    c2.metric("Cumulative Return", f"{tracker_metrics['total_return'] * 100:.2f}%")
+    c3.metric("SPY Return", f"{tracker_metrics['spy_total_return'] * 100:.2f}%")
+    c4.metric("Current Holding", tracker_metrics["current_holding"])
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Sharpe Ratio", f"{tracker_metrics['sharpe']:.2f}")
+    c6.metric("Max Drawdown", f"{tracker_metrics['max_drawdown'] * 100:.2f}%")
+    c7.metric("Annualized Volatility", f"{tracker_metrics['volatility'] * 100:.2f}%")
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=portfolio_df.index,
+            y=portfolio_df["Portfolio Value"],
+            name="Hypothetical $1MM Portfolio",
+            line=dict(width=2),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=portfolio_df.index,
+            y=portfolio_df["Benchmark SPY Value"],
+            name="SPY Benchmark",
+            line=dict(width=2, dash="dash"),
+        )
+    )
+    fig.update_layout(
+        title="Hypothetical Portfolio Value vs SPY",
+        xaxis_title="Date",
+        yaxis_title="Portfolio Value ($)",
+        template="plotly_white",
+        margin=dict(l=10, r=10, t=40, b=30),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    display_df = portfolio_df.reset_index()[
+        [
+            "Date",
+            "Combined Signal",
+            "Held Asset",
+            "Portfolio Value",
+            "Daily Return",
+            "Cumulative Return",
+            "Cash / Allocation",
+        ]
+    ].tail(60)
+    st.dataframe(
+        display_df.style.format(
+            {
+                "Portfolio Value": "${:,.2f}",
+                "Daily Return": "{:.2%}",
+                "Cumulative Return": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+
 def render_strategy_results(result):
     if "signal" in result:
         render_signal_card(result["signal"])
@@ -1450,6 +1648,7 @@ def main():
                 f"Backtest data loaded once for {len(backtest_close.columns)} ETFs from "
                 f"{backtest_close.index.min().date()} to {backtest_close.index.max().date()}."
             )
+            render_workflow_diagram()
 
             with st.spinner("Calculating 10 strategy backtests..."):
                 comparison_results = run_all_strategy_backtests(
@@ -1466,6 +1665,12 @@ def main():
                 render_top_strategy_summary(available_results[summary_strategy])
 
             render_combined_signal_section(combined_signal, comparison_results)
+            portfolio_df, tracker_metrics = build_hypothetical_portfolio_tracker(
+                backtest_close,
+                transaction_cost=transaction_cost,
+                ma_symbol=ma_symbol,
+            )
+            render_hypothetical_portfolio_tracker(portfolio_df, tracker_metrics)
             st.divider()
 
             strategy_tabs = st.tabs(STRATEGY_TYPES)
