@@ -1207,34 +1207,84 @@ def build_hypothetical_portfolio_tracker(close, transaction_cost=0.0005, ma_symb
 
 def render_workflow_diagram():
     st.subheader("Workflow Diagram")
-    labels = [
-        "Market Data Inputs",
-        "Data Processing",
-        "Strategy Models",
-        "Signal Generation",
-        "Combined Signal",
-        "Portfolio Allocation",
-        "Performance Tracking",
-        "Dashboard Output",
+    steps = [
+        ("Market Data Inputs", "ETF prices, benchmark, defensive assets"),
+        ("Data Processing", "Returns, moving averages, RSI, volatility"),
+        ("Strategy Models", "10 rule-based strategy engines"),
+        ("Signal Generation", "BUY / HOLD / RISK-OFF per strategy"),
+        ("Combined Signal", "Vote score across all strategies"),
+        ("Portfolio Allocation", "Risk-on ETF, defensive ETF, or cash"),
+        ("Performance Tracking", "Portfolio value, returns, drawdown"),
+        ("Dashboard Output", "Signals, charts, tables, summaries"),
     ]
-    fig = go.Figure(
-        data=[
-            go.Sankey(
-                node=dict(label=labels, pad=18, thickness=18),
-                link=dict(
-                    source=list(range(len(labels) - 1)),
-                    target=list(range(1, len(labels))),
-                    value=[1] * (len(labels) - 1),
-                ),
-            )
-        ]
+    cards = ""
+    for index, (title, detail) in enumerate(steps, start=1):
+        arrow = "<div class='workflow-arrow'>-></div>" if index < len(steps) else ""
+        cards += (
+            "<div class='workflow-step'>"
+            f"<div class='workflow-number'>{index}</div>"
+            f"<div class='workflow-title'>{title}</div>"
+            f"<div class='workflow-detail'>{detail}</div>"
+            "</div>"
+            f"{arrow}"
+        )
+    st.markdown(
+        f"""
+        <style>
+        .workflow-wrap {{
+            display: flex;
+            align-items: stretch;
+            gap: 10px;
+            overflow-x: auto;
+            padding: 8px 2px 12px 2px;
+        }}
+        .workflow-step {{
+            min-width: 150px;
+            max-width: 170px;
+            border: 1px solid #d7dde8;
+            border-radius: 8px;
+            padding: 12px;
+            background: #ffffff;
+            box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }}
+        .workflow-number {{
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #1f77b4;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 13px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }}
+        .workflow-title {{
+            font-size: 14px;
+            font-weight: 700;
+            color: #111827;
+            line-height: 1.25;
+            margin-bottom: 6px;
+        }}
+        .workflow-detail {{
+            font-size: 12px;
+            color: #4b5563;
+            line-height: 1.35;
+        }}
+        .workflow-arrow {{
+            display: flex;
+            align-items: center;
+            color: #6b7280;
+            font-weight: 700;
+            font-size: 18px;
+        }}
+        </style>
+        <div class="workflow-wrap">{cards}</div>
+        """,
+        unsafe_allow_html=True,
     )
-    fig.update_layout(
-        title="Market Data Inputs -> Data Processing -> Strategy Models -> Signal Generation -> Combined Signal -> Portfolio Allocation -> Performance Tracking -> Dashboard Output",
-        height=360,
-        margin=dict(l=10, r=10, t=50, b=10),
-    )
-    st.plotly_chart(fig, use_container_width=True)
 
 
 def render_hypothetical_portfolio_tracker(portfolio_df, tracker_metrics):
