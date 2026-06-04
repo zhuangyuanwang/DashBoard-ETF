@@ -33,9 +33,18 @@ STRATEGY_TYPES = [
     "Moving Average Trend Following",
     "Dual Momentum",
     "Low Volatility Rotation",
+    "Defensive Rotation Strategy",
+    "Risk-On / Risk-Off Regime Strategy",
+    "Breakout Strategy",
+    "Mean Reversion Strategy",
+    "Volatility Target Strategy",
+    "Equal Weight Multi-ETF Strategy",
 ]
 
 SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_TYPES
+
+DEFENSIVE_ETFS = ["TLT", "IEF", "GLD", "SHY", "XLV", "XLU"]
+RISK_ON_ETFS = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLY", "XLI", "XLC", "EFA", "EEM"]
 
 BACKTEST_PERIODS = {
     "3 Years": 3,
@@ -81,9 +90,20 @@ def calculate_indicators(close):
         "returns_12m": close.pct_change(252),
         "ma50": close.rolling(50).mean(),
         "ma200": close.rolling(200).mean(),
+        "rolling_high_55": close.rolling(55).max().shift(1),
+        "rolling_low_20": close.rolling(20).min().shift(1),
+        "rsi14": calculate_rsi(close),
         "vol20": close.pct_change().rolling(20).std() * np.sqrt(252),
         "vol60": close.pct_change().rolling(60).std() * np.sqrt(252),
     }
+
+
+def calculate_rsi(close, window=14):
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(window).mean()
+    loss = (-delta.clip(upper=0)).rolling(window).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
 
 
 def calculate_momentum_scores(indicators):
@@ -94,6 +114,21 @@ def calculate_momentum_scores(indicators):
         + indicators["returns_12m"] * 0.20
     )
     return scores.dropna(how="all")
+
+
+def calculate_volatility(close, window=20):
+    return close.pct_change().rolling(window).std() * np.sqrt(252)
+
+
+def available_symbols(close, symbols):
+    return [symbol for symbol in symbols if symbol in close.columns]
+
+
+def latest_valid_date(close, signal_date):
+    valid_dates = close.index[close.index <= signal_date]
+    if len(valid_dates) == 0:
+        return None
+    return valid_dates[-1]
 
 
 def build_line_chart(df, y, title, y_title):
@@ -355,7 +390,156 @@ def generate_strategy_signal(strategy_type, close, ma_symbol="SPY"):
         reason = f"Selected {selected} because it had one of the lowest recent volatility levels among eligible ETFs."
         return make_signal(strategy_type, signal_date, selected, final_signal, strength, reason, vote)
 
+    if strategy_type == "Defensive Rotation Strategy":
+        if "SPY" not in close.columns:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "SPY data is required to classify the market regime.", -1)
+        spy_close = close["SPY"].dropna()
+        ma50 = indicators["ma50"]["SPY"].dropna()
+        ma200 = indicators["ma200"]["SPY"].dropna()
+        if spy_close.empty or ma50.empty or ma200.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough SPY history to calculate defensive regime conditions.", -1)
+        spy_price = spy_close.iloc[-1]
+        spy_ma50 = ma50.iloc[-1]
+        spy_ma200 = ma200.iloc[-1]
+        risk_off_conditions = [spy_price < spy_ma50, spy_price < spy_ma200, spy_ma50 < spy_ma200]
+        risk_off_count = sum(risk_off_conditions)
+        strength = risk_off_count / 3 * 100
+        if risk_off_count >= 2:
+            defensive_symbols = available_symbols(close, DEFENSIVE_ETFS)
+            vol60 = indicators["vol60"][defensive_symbols].iloc[-1].dropna() if defensive_symbols else pd.Series(dtype=float)
+            selected = vol60.sort_values().index[0] if not vol60.empty else "SHY"
+            reason = f"Selected {selected} because SPY is below key moving averages, indicating a defensive market regime."
+            return make_signal(strategy_type, signal_date, selected, "RISK-OFF", strength, reason, -1)
+        risk_symbols = available_symbols(close, RISK_ON_ETFS)
+        scores = calculate_momentum_scores(indicators)[risk_symbols].iloc[-1].dropna() if risk_symbols else pd.Series(dtype=float)
+        selected = scores.sort_values(ascending=False).index[0] if not scores.empty else "SPY"
+        final_signal = "BUY" if risk_off_count == 0 else "HOLD"
+        vote = 1 if final_signal == "BUY" else 0
+        reason = f"Selected {selected} because SPY trend is healthy enough to allow risk-on exposure."
+        return make_signal(strategy_type, signal_date, selected, final_signal, max(0, 100 - strength), reason, vote)
+
+    if strategy_type == "Risk-On / Risk-Off Regime Strategy":
+        if "SPY" not in close.columns:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "SPY data is required to classify the regime.", -1)
+        spy_close = close["SPY"].dropna()
+        ma50 = indicators["ma50"]["SPY"].dropna()
+        ma200 = indicators["ma200"]["SPY"].dropna()
+        vol20 = indicators["vol20"]["SPY"].dropna()
+        if spy_close.empty or ma50.empty or ma200.empty or vol20.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough SPY history for trend and volatility regime checks.", -1)
+        price = spy_close.iloc[-1]
+        above_ma50 = price > ma50.iloc[-1]
+        above_ma200 = price > ma200.iloc[-1]
+        calm_vol = vol20.iloc[-1] < 0.25
+        healthy_count = sum([above_ma50, above_ma200, calm_vol])
+        strength = healthy_count / 3 * 100
+        if above_ma50 and above_ma200:
+            reason = "Risk-on signal because SPY is trading above both MA50 and MA200."
+            return make_signal(strategy_type, signal_date, "SPY", "BUY", strength, reason, 1)
+        if (not above_ma50) and (not above_ma200):
+            reason = "Risk-off signal because SPY is trading below both MA50 and MA200."
+            return make_signal(strategy_type, signal_date, "SHY", "RISK-OFF", 100 - strength, reason, -1)
+        reason = "Mixed regime because SPY is above one key moving average but below the other."
+        return make_signal(strategy_type, signal_date, "SPY", "HOLD", 50, reason, 0)
+
+    if strategy_type == "Breakout Strategy":
+        rolling_high = indicators["rolling_high_55"]
+        rolling_low = indicators["rolling_low_20"]
+        latest_close = close.iloc[-1].dropna()
+        latest_high = rolling_high.iloc[-1].dropna()
+        latest_low = rolling_low.iloc[-1].dropna()
+        breakout_symbols = latest_close.index.intersection(latest_high.index)
+        if len(breakout_symbols) == 0:
+            return make_signal(strategy_type, signal_date, "Cash", "HOLD", 0, "Not enough history to calculate breakout levels.", 0)
+        breakout_ratio = (latest_close[breakout_symbols] / latest_high[breakout_symbols] - 1).dropna()
+        selected = breakout_ratio.sort_values(ascending=False).index[0]
+        best_ratio = breakout_ratio.loc[selected]
+        if best_ratio > 0:
+            strength = min(100, 50 + best_ratio * 1000)
+            reason = f"BUY signal because {selected} closed above its 55-day high."
+            return make_signal(strategy_type, signal_date, selected, "BUY", strength, reason, 1)
+        low_symbols = latest_close.index.intersection(latest_low.index)
+        breakdown_ratio = (latest_close[low_symbols] / latest_low[low_symbols] - 1).dropna() if len(low_symbols) else pd.Series(dtype=float)
+        if not breakdown_ratio.empty and breakdown_ratio.min() < 0:
+            selected = breakdown_ratio.sort_values().index[0]
+            strength = min(100, abs(breakdown_ratio.min()) * 1000)
+            reason = f"CASH signal because {selected} broke below its recent 20-day low."
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", strength, reason, -1)
+        reason = "No ETF closed above its 55-day high or below its 20-day low."
+        return make_signal(strategy_type, signal_date, selected, "HOLD", max(0, 50 + best_ratio * 1000), reason, 0)
+
+    if strategy_type == "Mean Reversion Strategy":
+        rsi = indicators["rsi14"].iloc[-1].dropna()
+        ma200 = indicators["ma200"].iloc[-1].dropna()
+        latest_close = close.iloc[-1].dropna()
+        valid = rsi.index.intersection(ma200.index).intersection(latest_close.index)
+        if len(valid) == 0:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history to calculate RSI and MA200.", -1)
+        healthy = latest_close[valid] > ma200[valid]
+        oversold = rsi[valid] < 30
+        candidates = rsi[valid][healthy & oversold].sort_values()
+        if not candidates.empty:
+            selected = candidates.index[0]
+            strength = min(100, (30 - candidates.iloc[0]) / 30 * 100)
+            reason = f"BUY signal because {selected} is oversold with RSI below 30 while still above MA200."
+            return make_signal(strategy_type, signal_date, selected, "BUY", strength, reason, 1)
+        overbought = rsi[valid] > 70
+        weak = ~healthy
+        if overbought.any() or weak.mean() > 0.5:
+            selected = rsi[valid].sort_values(ascending=False).index[0]
+            strength = min(100, max(0, rsi[valid].max() - 50) * 2)
+            reason = f"CASH signal because {selected} is overbought or the ETF universe has weak long-term trend conditions."
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", strength, reason, -1)
+        selected = rsi[valid].sub(50).abs().sort_values().index[0]
+        reason = "HOLD signal because RSI is neutral and no oversold long-term uptrend setup is present."
+        return make_signal(strategy_type, signal_date, selected, "HOLD", 50, reason, 0)
+
+    if strategy_type == "Volatility Target Strategy":
+        if "SPY" not in close.columns:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "SPY data is required for volatility targeting.", -1)
+        vol20 = indicators["vol20"]["SPY"].dropna()
+        ma200 = indicators["ma200"]["SPY"].dropna()
+        spy_close = close["SPY"].dropna()
+        if vol20.empty or ma200.empty or spy_close.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough SPY history to calculate volatility target conditions.", -1)
+        target_vol = 0.15
+        high_vol = 0.25
+        current_vol = vol20.iloc[-1]
+        trend_positive = spy_close.iloc[-1] > ma200.iloc[-1]
+        distance = abs(current_vol - target_vol) / target_vol
+        strength = min(100, distance * 100)
+        if current_vol <= target_vol and trend_positive:
+            reason = "BUY signal because 20-day annualized volatility is below target and SPY trend is positive."
+            return make_signal(strategy_type, signal_date, "SPY", "BUY", max(50, strength), reason, 1)
+        if current_vol >= high_vol or not trend_positive:
+            reason = "RISK-OFF signal because 20-day annualized volatility is above the target threshold or trend is weak."
+            return make_signal(strategy_type, signal_date, "SHY", "RISK-OFF", max(50, strength), reason, -1)
+        reason = "HOLD signal because volatility is near the target range."
+        return make_signal(strategy_type, signal_date, "SPY", "HOLD", max(25, 100 - strength), reason, 0)
+
+    if strategy_type == "Equal Weight Multi-ETF Strategy":
+        ma50 = indicators["ma50"].iloc[-1].dropna()
+        ma200 = indicators["ma200"].iloc[-1].dropna()
+        latest_close = close.iloc[-1].dropna()
+        valid = latest_close.index.intersection(ma50.index).intersection(ma200.index)
+        if len(valid) == 0:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history to calculate MA50 and MA200 filters.", -1)
+        passing = latest_close[valid][(latest_close[valid] > ma50[valid]) & (latest_close[valid] > ma200[valid])].index.tolist()
+        strength = len(passing) / len(valid) * 100
+        if len(passing) >= max(3, len(valid) * 0.4):
+            reason = f"BUY signal because {len(passing)} out of {len(valid)} ETFs are above both MA50 and MA200."
+            return make_signal(strategy_type, signal_date, ", ".join(passing[:6]), "BUY", strength, reason, 1)
+        if passing:
+            reason = f"HOLD signal because only {len(passing)} out of {len(valid)} ETFs pass the trend filter."
+            return make_signal(strategy_type, signal_date, ", ".join(passing[:6]), "HOLD", strength, reason, 0)
+        reason = f"RISK-OFF signal because 0 out of {len(valid)} ETFs are above both MA50 and MA200."
+        return make_signal(strategy_type, signal_date, "SHY", "RISK-OFF", 100, reason, -1)
+
     return make_signal(strategy_type, signal_date, "N/A", "HOLD", 0, "Unknown strategy type.", 0)
+
+
+def generate_all_strategy_signals(close, ma_symbol="SPY"):
+    return {strategy_type: generate_strategy_signal(strategy_type, close, ma_symbol=ma_symbol) for strategy_type in STRATEGY_TYPES}
 
 
 def combine_strategy_signals(signals):
@@ -677,16 +861,115 @@ def run_low_volatility_backtest(close, top_n=3, lookback_days=66, transaction_co
     return result
 
 
+def weights_from_signal(signal, close_columns):
+    weights = pd.Series(0.0, index=close_columns)
+    selected_assets = [asset.strip() for asset in str(signal["Selected Asset"]).split(",")]
+    selected_assets = [asset for asset in selected_assets if asset in weights.index]
+
+    if signal["Signal"] in ["CASH", "SELL"] and "SHY" not in selected_assets:
+        return weights
+
+    if not selected_assets:
+        if signal["Signal"] == "RISK-OFF" and "SHY" in weights.index:
+            weights["SHY"] = 1.0
+        return weights
+
+    for asset in selected_assets:
+        weights[asset] = 1.0 / len(selected_assets)
+    return weights
+
+
+def run_rule_based_monthly_backtest(strategy_type, close, transaction_cost=0.0005, ma_symbol="SPY", benchmark_symbol="SPY"):
+    monthly_prices = close.resample("ME").last()
+    daily_returns = close.pct_change().dropna()
+    strategy_returns = pd.Series(index=daily_returns.index, dtype=float)
+    previous_weights = pd.Series(0.0, index=close.columns)
+    turnover_list = []
+    rebalances = []
+    monthly_holdings = []
+    trade_log = []
+    signal_rows = []
+
+    month_ends = monthly_prices.index
+    for idx in range(12, len(month_ends) - 1):
+        month_end = month_ends[idx]
+        signal_date = latest_valid_date(close, month_end)
+        if signal_date is None:
+            continue
+
+        history = close.loc[:signal_date]
+        signal = generate_strategy_signal(strategy_type, history, ma_symbol=ma_symbol)
+        new_weights = weights_from_signal(signal, close.columns)
+        turnover = (new_weights - previous_weights).abs().sum() / 2
+        turnover_list.append(turnover)
+        rebalances.append(signal_date)
+        monthly_holdings.append(
+            {
+                "Date": signal_date,
+                "Holdings": new_weights[new_weights > 0].index.tolist() or ["Cash"],
+                "Holdings_str": format_holdings(new_weights),
+            }
+        )
+        signal_rows.append(signal)
+
+        trade_date = get_next_trade_date(daily_returns, signal_date)
+        next_rebalance_date = month_ends[idx + 1]
+        trade_log.append(build_trade_log_entry(signal_date, trade_date, previous_weights, new_weights, next_rebalance_date))
+
+        period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_rebalance_date)
+        if period_mask.any():
+            active_weights = new_weights[new_weights > 0]
+            if active_weights.empty:
+                tranche_returns = pd.Series(0.0, index=daily_returns.loc[period_mask].index)
+            else:
+                tranche_returns = daily_returns.loc[period_mask, active_weights.index].dot(active_weights)
+            if len(tranche_returns) > 0:
+                tranche_returns.iloc[0] -= turnover * transaction_cost
+            strategy_returns.loc[period_mask] = tranche_returns
+        previous_weights = new_weights
+
+    latest_signal = generate_strategy_signal(strategy_type, close, ma_symbol=ma_symbol)
+    signal_table = pd.DataFrame(signal_rows).drop(columns=["Vote"], errors="ignore") if signal_rows else None
+    result = build_backtest_result(
+        close,
+        strategy_returns,
+        strategy_type,
+        benchmark_symbol=benchmark_symbol,
+        transaction_cost=transaction_cost,
+        rebalances=rebalances,
+        turnover_list=turnover_list,
+        monthly_holdings=monthly_holdings,
+        trade_log=trade_log,
+        latest_scores=signal_table.tail(12) if signal_table is not None else None,
+        summary_points=[
+            "Historical signals use data available up to each month-end signal date.",
+            "Trades are applied during the following month after the signal date.",
+            "The latest daily signal is shown separately at the top of this strategy tab.",
+        ],
+    )
+    if result is not None:
+        result["signal"] = latest_signal
+    return result
+
+
 def backtest_strategy(strategy_type, close, transaction_cost, ma_symbol="SPY", benchmark_symbol="SPY"):
     if strategy_type == "Momentum Rotation":
         result = run_momentum_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
-    if strategy_type == "Moving Average Trend Following":
-        result = run_moving_average_trend_backtest(close, symbol=ma_symbol, benchmark_symbol=ma_symbol, transaction_cost=transaction_cost)
-    if strategy_type == "Dual Momentum":
+    elif strategy_type == "Moving Average Trend Following":
+        result = run_moving_average_trend_backtest(close, symbol=ma_symbol, benchmark_symbol=benchmark_symbol, transaction_cost=transaction_cost)
+    elif strategy_type == "Dual Momentum":
         result = run_dual_momentum_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
-    if strategy_type == "Low Volatility Rotation":
+    elif strategy_type == "Low Volatility Rotation":
         result = run_low_volatility_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
-    if strategy_type not in STRATEGY_TYPES:
+    elif strategy_type in STRATEGY_TYPES:
+        return run_rule_based_monthly_backtest(
+            strategy_type,
+            close,
+            transaction_cost=transaction_cost,
+            ma_symbol=ma_symbol,
+            benchmark_symbol=benchmark_symbol,
+        )
+    else:
         return None
     if result is not None:
         result["signal"] = generate_strategy_signal(strategy_type, close, ma_symbol=ma_symbol)
@@ -758,6 +1041,54 @@ def render_combined_strategy_section(combined_signal, strategy_signals):
         ["Latest Signal Date", "Selected Asset", "Signal", "Signal Strength", "Vote", "Reason"]
     ]
     st.dataframe(vote_df, use_container_width=True)
+
+
+def build_all_strategy_signals_table(results):
+    rows = []
+    for strategy_name, result in results.items():
+        if result is None or "signal" not in result:
+            continue
+        signal = result["signal"]
+        rows.append(
+            {
+                "Strategy Name": strategy_name,
+                "Latest Signal": signal["Signal"],
+                "Selected ETF / Asset": signal["Selected Asset"],
+                "Signal Strength": signal["Signal Strength"],
+                "Reason": signal["Reason"],
+                "Strategy Return": result["metrics"]["total_return"] * 100,
+                "SPY Return": benchmark_total_return(result) * 100,
+                "Sharpe Ratio": result["metrics"]["sharpe"],
+                "Max Drawdown": result["metrics"]["max_drawdown"] * 100,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_combined_signal_section(combined_signal, results):
+    strategy_signals = {
+        strategy_name: result["signal"]
+        for strategy_name, result in results.items()
+        if result is not None and "signal" in result
+    }
+    render_combined_strategy_section(combined_signal, strategy_signals)
+    st.subheader("All Strategy Signals")
+    signal_table = build_all_strategy_signals_table(results)
+    if signal_table.empty:
+        st.warning("No strategy signal table is available.")
+    else:
+        st.dataframe(
+            signal_table.style.format(
+                {
+                    "Signal Strength": "{:.1f}",
+                    "Strategy Return": "{:.2f}%",
+                    "SPY Return": "{:.2f}%",
+                    "Sharpe Ratio": "{:.2f}",
+                    "Max Drawdown": "{:.2f}%",
+                }
+            ),
+            use_container_width=True,
+        )
 
 
 def render_strategy_results(result):
@@ -863,6 +1194,10 @@ def render_strategy_results(result):
 
     st.subheader("Rule-Based Summary")
     st.markdown(build_strategy_summary(result))
+
+
+def render_strategy_tab(result):
+    render_strategy_results(result)
 
 
 def build_strategy_comparison(results):
@@ -1085,7 +1420,7 @@ def main():
 
         backtest_end = pd.Timestamp.today().normalize()
         backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
-        backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | {"SPY", "SHY", ma_symbol}))
+        backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | set(DEFENSIVE_ETFS) | set(RISK_ON_ETFS) | {"SPY", "SHY", ma_symbol}))
 
         with st.spinner("Downloading backtest price data..."):
             backtest_close = load_backtest_data(
@@ -1118,7 +1453,7 @@ def main():
             if summary_strategy in available_results:
                 render_top_strategy_summary(available_results[summary_strategy])
 
-            render_combined_strategy_section(combined_signal, strategy_signals)
+            render_combined_signal_section(combined_signal, comparison_results)
             st.divider()
 
             strategy_tabs = st.tabs(STRATEGY_TYPES)
@@ -1128,7 +1463,7 @@ def main():
                     if result is None:
                         st.error("Backtest failed due to insufficient historical data for this strategy.")
                     else:
-                        render_strategy_results(result)
+                        render_strategy_tab(result)
 
             st.divider()
             st.subheader("Strategy Comparison")
