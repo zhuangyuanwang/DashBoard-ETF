@@ -35,6 +35,8 @@ STRATEGY_TYPES = [
     "Low Volatility Rotation",
 ]
 
+SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_TYPES
+
 BACKTEST_PERIODS = {
     "3 Years": 3,
     "5 Years": 5,
@@ -71,6 +73,29 @@ def compute_returns(close):
     return close.pct_change().dropna()
 
 
+def calculate_indicators(close):
+    return {
+        "returns_1m": close.pct_change(21),
+        "returns_3m": close.pct_change(63),
+        "returns_6m": close.pct_change(126),
+        "returns_12m": close.pct_change(252),
+        "ma50": close.rolling(50).mean(),
+        "ma200": close.rolling(200).mean(),
+        "vol20": close.pct_change().rolling(20).std() * np.sqrt(252),
+        "vol60": close.pct_change().rolling(60).std() * np.sqrt(252),
+    }
+
+
+def calculate_momentum_scores(indicators):
+    scores = (
+        indicators["returns_1m"] * 0.15
+        + indicators["returns_3m"] * 0.35
+        + indicators["returns_6m"] * 0.30
+        + indicators["returns_12m"] * 0.20
+    )
+    return scores.dropna(how="all")
+
+
 def build_line_chart(df, y, title, y_title):
     fig = px.line(df, x=df.index, y=y, title=title)
     fig.update_traces(mode="lines+markers", marker=dict(size=4, opacity=0.8))
@@ -101,7 +126,7 @@ def load_backtest_data(symbols, start_date, end_date):
     return extract_close_prices(df, symbols)
 
 
-def calculate_backtest_metrics(strategy_equity, strategy_returns, number_rebalances):
+def calculate_performance_metrics(strategy_equity, strategy_returns, number_rebalances):
     total_return = strategy_equity.iloc[-1] - 1
     years = (strategy_equity.index[-1] - strategy_equity.index[0]).days / 365.25
     cagr = strategy_equity.iloc[-1] ** (1 / years) - 1 if years > 0 else np.nan
@@ -118,6 +143,10 @@ def calculate_backtest_metrics(strategy_equity, strategy_returns, number_rebalan
         "max_drawdown": max_dd,
         "number_rebalances": number_rebalances,
     }
+
+
+def calculate_backtest_metrics(strategy_equity, strategy_returns, number_rebalances):
+    return calculate_performance_metrics(strategy_equity, strategy_returns, number_rebalances)
 
 
 def build_backtest_result(
@@ -219,6 +248,136 @@ def build_trade_log_entry(signal_date, trade_date, previous_weights, new_weights
         "Sell ETFs": ", ".join(sell_etfs) if sell_etfs else "None",
         "Next Rebalance Date": next_rebalance_date.strftime("%Y-%m-%d") if next_rebalance_date else "N/A",
     }
+
+
+def make_signal(strategy, signal_date, selected_asset, final_signal, strength, reason, vote):
+    return {
+        "Strategy": strategy,
+        "Latest Signal Date": signal_date.strftime("%Y-%m-%d") if hasattr(signal_date, "strftime") else "N/A",
+        "Selected Asset": selected_asset,
+        "Signal": final_signal,
+        "Signal Strength": max(0, min(100, round(strength, 1))),
+        "Reason": reason,
+        "Vote": vote,
+    }
+
+
+def generate_strategy_signal(strategy_type, close, ma_symbol="SPY"):
+    close = close.dropna(how="all")
+    if close.empty:
+        return make_signal(strategy_type, "N/A", "N/A", "CASH", 0, "No price data is available.", -1)
+
+    indicators = calculate_indicators(close)
+    signal_date = close.index[-1]
+
+    if strategy_type == "Momentum Rotation":
+        momentum_scores = calculate_momentum_scores(indicators)
+        if momentum_scores.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history to calculate weighted momentum.", -1)
+        latest_scores = momentum_scores.iloc[-1].dropna().sort_values(ascending=False)
+        if latest_scores.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "No ETF has a valid momentum score.", -1)
+        selected = latest_scores.index[0]
+        second_score = latest_scores.iloc[1] if len(latest_scores) > 1 else 0
+        top_score = latest_scores.iloc[0]
+        rank_advantage = top_score - second_score
+        strength = 50 + min(50, max(0, rank_advantage * 500))
+        final_signal = "BUY" if top_score > 0 else "HOLD"
+        vote = 1 if final_signal == "BUY" else 0
+        reason = f"Selected {selected} because it has the highest weighted momentum score among the ETF universe."
+        return make_signal(strategy_type, signal_date, selected, final_signal, strength, reason, vote)
+
+    if strategy_type == "Moving Average Trend Following":
+        symbol = ma_symbol if ma_symbol in close.columns else close.columns[0]
+        latest_close = close[symbol].dropna()
+        if latest_close.empty:
+            return make_signal(strategy_type, signal_date, symbol, "CASH", 0, f"No price data is available for {symbol}.", -1)
+        symbol_date = latest_close.index[-1]
+        price = latest_close.iloc[-1]
+        ma50 = indicators["ma50"][symbol].dropna()
+        ma200 = indicators["ma200"][symbol].dropna()
+        if ma50.empty or ma200.empty:
+            return make_signal(strategy_type, symbol_date, symbol, "CASH", 0, f"Not enough history to calculate MA50 and MA200 for {symbol}.", -1)
+        latest_ma50 = ma50.iloc[-1]
+        latest_ma200 = ma200.iloc[-1]
+        conditions = [price > latest_ma50, price > latest_ma200, latest_ma50 > latest_ma200]
+        passed = sum(conditions)
+        strength = passed / 3 * 100
+        if passed >= 2:
+            final_signal = "BUY" if passed == 3 else "HOLD"
+            vote = 1 if final_signal == "BUY" else 0
+        else:
+            final_signal = "CASH"
+            vote = -1
+        reason = (
+            f"{symbol} satisfies {passed}/3 bullish trend conditions: "
+            "Close > MA50, Close > MA200, and MA50 > MA200."
+        )
+        return make_signal(strategy_type, symbol_date, symbol, final_signal, strength, reason, vote)
+
+    if strategy_type == "Dual Momentum":
+        returns_12m = indicators["returns_12m"].dropna(how="all")
+        if returns_12m.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "RISK-OFF", 0, "Not enough history to calculate 12-month momentum.", -1)
+        latest_returns = returns_12m.iloc[-1].dropna().sort_values(ascending=False)
+        if latest_returns.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "RISK-OFF", 0, "No ETF has a valid 12-month momentum value.", -1)
+        selected = latest_returns.index[0]
+        top_return = latest_returns.iloc[0]
+        second_return = latest_returns.iloc[1] if len(latest_returns) > 1 else 0
+        relative_score = 50 + min(25, max(0, (top_return - second_return) * 250))
+        absolute_score = min(25, max(0, top_return * 100))
+        strength = relative_score + absolute_score
+        if top_return > 0:
+            reason = f"Selected {selected} because it ranked highest among ETFs and had positive 12-month momentum."
+            return make_signal(strategy_type, signal_date, selected, "BUY", strength, reason, 1)
+        reason = f"Moved risk-off because the top-ranked ETF, {selected}, did not have positive 12-month momentum."
+        defensive_asset = "SHY" if "SHY" in close.columns else "Cash"
+        return make_signal(strategy_type, signal_date, defensive_asset, "RISK-OFF", max(0, 100 - strength), reason, -1)
+
+    if strategy_type == "Low Volatility Rotation":
+        vol60 = indicators["vol60"].dropna(how="all")
+        if vol60.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history to calculate 60-day volatility.", -1)
+        latest_vol = vol60.iloc[-1].dropna().sort_values()
+        if latest_vol.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "No ETF has a valid recent volatility value.", -1)
+        returns_3m = indicators["returns_3m"].reindex(latest_vol.index, axis=1).iloc[-1]
+        eligible = returns_3m[returns_3m > 0].dropna().index.tolist()
+        ranked_vol = latest_vol.loc[eligible].sort_values() if eligible else latest_vol
+        selected = ranked_vol.index[0]
+        rank_position = latest_vol.index.get_loc(selected) + 1
+        rank_score = (len(latest_vol) - rank_position + 1) / len(latest_vol) * 70
+        momentum_score = 30 if selected in eligible else 0
+        strength = rank_score + momentum_score
+        final_signal = "BUY" if selected in eligible else "HOLD"
+        vote = 1 if final_signal == "BUY" else 0
+        reason = f"Selected {selected} because it had one of the lowest recent volatility levels among eligible ETFs."
+        return make_signal(strategy_type, signal_date, selected, final_signal, strength, reason, vote)
+
+    return make_signal(strategy_type, signal_date, "N/A", "HOLD", 0, "Unknown strategy type.", 0)
+
+
+def combine_strategy_signals(signals):
+    valid_signals = [signal for signal in signals.values() if signal is not None]
+    if not valid_signals:
+        return make_signal("Combined Strategy", "N/A", "Cash", "HOLD", 0, "No strategy signals are available.", 0)
+
+    average_vote = np.mean([signal["Vote"] for signal in valid_signals])
+    if average_vote >= 0.3:
+        final_signal = "BUY"
+    elif average_vote <= -0.3:
+        final_signal = "RISK-OFF"
+    else:
+        final_signal = "HOLD"
+
+    buy_assets = [signal["Selected Asset"] for signal in valid_signals if signal["Vote"] == 1]
+    selected_asset = buy_assets[0] if buy_assets else "Cash"
+    strength = abs(average_vote) * 100
+    reason = f"Combined vote score is {average_vote:.2f}. BUY/HOLD/RISK-OFF votes are averaged across the four strategies."
+    latest_dates = [signal["Latest Signal Date"] for signal in valid_signals if signal["Latest Signal Date"] != "N/A"]
+    latest_date = max(latest_dates) if latest_dates else "N/A"
+    return make_signal("Combined Strategy", latest_date, selected_asset, final_signal, strength, reason, average_vote)
 
 
 def run_momentum_backtest(close, top_n=3, lookback_months=3, transaction_cost=0.0005, benchmark_symbol="SPY"):
@@ -518,16 +677,24 @@ def run_low_volatility_backtest(close, top_n=3, lookback_days=66, transaction_co
     return result
 
 
-def run_strategy_backtest(strategy_type, close, transaction_cost, ma_symbol="SPY", benchmark_symbol="SPY"):
+def backtest_strategy(strategy_type, close, transaction_cost, ma_symbol="SPY", benchmark_symbol="SPY"):
     if strategy_type == "Momentum Rotation":
-        return run_momentum_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
+        result = run_momentum_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
     if strategy_type == "Moving Average Trend Following":
-        return run_moving_average_trend_backtest(close, symbol=ma_symbol, benchmark_symbol=ma_symbol, transaction_cost=transaction_cost)
+        result = run_moving_average_trend_backtest(close, symbol=ma_symbol, benchmark_symbol=ma_symbol, transaction_cost=transaction_cost)
     if strategy_type == "Dual Momentum":
-        return run_dual_momentum_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
+        result = run_dual_momentum_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
     if strategy_type == "Low Volatility Rotation":
-        return run_low_volatility_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
-    return None
+        result = run_low_volatility_backtest(close, transaction_cost=transaction_cost, benchmark_symbol=benchmark_symbol)
+    if strategy_type not in STRATEGY_TYPES:
+        return None
+    if result is not None:
+        result["signal"] = generate_strategy_signal(strategy_type, close, ma_symbol=ma_symbol)
+    return result
+
+
+def run_strategy_backtest(strategy_type, close, transaction_cost, ma_symbol="SPY", benchmark_symbol="SPY"):
+    return backtest_strategy(strategy_type, close, transaction_cost, ma_symbol=ma_symbol, benchmark_symbol=benchmark_symbol)
 
 
 def build_strategy_summary(result):
@@ -542,7 +709,65 @@ def build_strategy_summary(result):
     return "\n\n".join(lines)
 
 
+def benchmark_total_return(result):
+    if result["benchmark_equity"].empty:
+        return np.nan
+    return result["benchmark_equity"].iloc[-1] - 1
+
+
+def render_signal_card(signal):
+    st.subheader("Latest Daily Signal")
+    st.write(
+        "Signal Strength is a rule-based score showing how strongly the latest data satisfies the strategy conditions. "
+        "It is not a predicted probability of profit."
+    )
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Latest Signal Date", signal["Latest Signal Date"])
+    c2.metric("Selected ETF / Asset", signal["Selected Asset"])
+    c3.metric("Signal", signal["Signal"])
+    c4.metric("Rule-Based Signal Strength", f"{signal['Signal Strength']:.1f}%")
+    c5.metric("Vote", f"{signal['Vote']:+.1f}")
+    st.write(f"**Reason:** {signal['Reason']}")
+
+
+def render_top_strategy_summary(result):
+    signal = result["signal"]
+    metrics = result["metrics"]
+    strategy_return = metrics["total_return"] * 100
+    spy_return = benchmark_total_return(result) * 100
+    st.subheader("Top-Level Strategy Summary")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Selected Strategy", result["strategy_name"])
+    c2.metric("Latest Data Date", signal["Latest Signal Date"])
+    c3.metric("Selected ETF", signal["Selected Asset"])
+    c4.metric("Final Signal", signal["Signal"])
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Signal Strength", f"{signal['Signal Strength']:.1f}%")
+    c6.metric("Benchmark", result["benchmark_symbol"])
+    c7.metric("Strategy vs SPY", f"{strategy_return:.2f}% / {spy_return:.2f}%")
+    c8.metric("Sharpe / Max DD", f"{metrics['sharpe']:.2f} / {metrics['max_drawdown'] * 100:.2f}%")
+
+
+def render_combined_strategy_section(combined_signal, strategy_signals):
+    st.subheader("Combined Strategy Signal")
+    render_signal_card(combined_signal)
+    if not strategy_signals:
+        st.warning("No individual strategy signals are available.")
+        return
+    vote_df = pd.DataFrame(strategy_signals).T[
+        ["Latest Signal Date", "Selected Asset", "Signal", "Signal Strength", "Vote", "Reason"]
+    ]
+    st.dataframe(vote_df, use_container_width=True)
+
+
 def render_strategy_results(result):
+    if "signal" in result:
+        render_signal_card(result["signal"])
+
+    strategy_return = result["metrics"]["total_return"] * 100
+    spy_return = benchmark_total_return(result) * 100
+    st.write(f"**Backtest performance vs SPY:** {strategy_return:.2f}% vs {spy_return:.2f}%")
+
     eq_fig = go.Figure()
     eq_fig.add_trace(
         go.Scatter(
@@ -755,6 +980,7 @@ def main():
     all_etf_symbols = get_all_etf_symbols()
     ma_default_index = all_etf_symbols.index("SPY") if "SPY" in all_etf_symbols else 0
     ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
+    summary_strategy = st.sidebar.selectbox("Top Summary Strategy", STRATEGY_TYPES, index=0)
     backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
     transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps)", min_value=0, max_value=100, value=5, step=1)
     transaction_cost = transaction_cost_bps / 10000
@@ -859,7 +1085,7 @@ def main():
 
         backtest_end = pd.Timestamp.today().normalize()
         backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
-        backtest_symbols = tuple(sorted(set(selected_tickers) | {"SPY", "SHY", ma_symbol}))
+        backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | {"SPY", "SHY", ma_symbol}))
 
         with st.spinner("Downloading backtest price data..."):
             backtest_close = load_backtest_data(
@@ -884,6 +1110,16 @@ def main():
                     transaction_cost,
                     ma_symbol=ma_symbol,
                 )
+
+            available_results = {name: result for name, result in comparison_results.items() if result is not None}
+            strategy_signals = {name: result["signal"] for name, result in available_results.items()}
+            combined_signal = combine_strategy_signals(strategy_signals)
+
+            if summary_strategy in available_results:
+                render_top_strategy_summary(available_results[summary_strategy])
+
+            render_combined_strategy_section(combined_signal, strategy_signals)
+            st.divider()
 
             strategy_tabs = st.tabs(STRATEGY_TYPES)
             for comparison_strategy, tab in zip(STRATEGY_TYPES, strategy_tabs):
