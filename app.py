@@ -289,12 +289,14 @@ def build_trade_log_entry(signal_date, trade_date, previous_weights, new_weights
 
 
 def make_signal(strategy, signal_date, selected_asset, final_signal, strength, reason, vote):
+    rule_match_score = max(0, min(100, round(strength, 1)))
     return {
         "Strategy": strategy,
         "Latest Signal Date": signal_date.strftime("%Y-%m-%d") if hasattr(signal_date, "strftime") else "N/A",
         "Selected Asset": selected_asset,
         "Signal": final_signal,
-        "Signal Strength": max(0, min(100, round(strength, 1))),
+        "Rule Match Score": rule_match_score,
+        "Signal Strength": rule_match_score,
         "Reason": reason,
         "Vote": vote,
     }
@@ -1017,14 +1019,14 @@ def benchmark_total_return(result):
 def render_signal_card(signal):
     st.subheader("Latest Daily Signal")
     st.write(
-        "Signal Strength is a rule-based score showing how strongly the latest data satisfies the strategy conditions. "
+        "Rule Match Score is a rule-based score showing how strongly the latest data satisfies the strategy conditions. "
         "It is not a predicted probability of profit."
     )
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Latest Signal Date", signal["Latest Signal Date"])
     c2.metric("Selected ETF / Asset", signal["Selected Asset"])
     c3.metric("Signal", signal["Signal"])
-    c4.metric("Rule-Based Signal Strength", f"{signal['Signal Strength']:.1f}%")
+    c4.metric("Rule Match Score", f"{signal['Rule Match Score']:.1f}%")
     c5.metric("Vote", f"{signal['Vote']:+.1f}")
     st.write(f"**Reason:** {signal['Reason']}")
 
@@ -1034,14 +1036,14 @@ def render_top_strategy_summary(result):
     metrics = result["metrics"]
     strategy_return = metrics["total_return"] * 100
     spy_return = benchmark_total_return(result) * 100
-    st.subheader("Top-Level Strategy Summary")
+    st.subheader("Selected Strategy Summary")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Selected Strategy", result["strategy_name"])
     c2.metric("Latest Data Date", signal["Latest Signal Date"])
     c3.metric("Selected ETF", signal["Selected Asset"])
     c4.metric("Final Signal", signal["Signal"])
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Signal Strength", f"{signal['Signal Strength']:.1f}%")
+    c5.metric("Rule Match Score", f"{signal['Rule Match Score']:.1f}%")
     c6.metric("Benchmark", result["benchmark_symbol"])
     c7.metric("Strategy vs SPY", f"{strategy_return:.2f}% / {spy_return:.2f}%")
     c8.metric("Sharpe / Max DD", f"{metrics['sharpe']:.2f} / {metrics['max_drawdown'] * 100:.2f}%")
@@ -1054,7 +1056,7 @@ def render_combined_strategy_section(combined_signal, strategy_signals):
         st.warning("No individual strategy signals are available.")
         return
     vote_df = pd.DataFrame(strategy_signals).T[
-        ["Latest Signal Date", "Selected Asset", "Signal", "Signal Strength", "Vote", "Reason"]
+        ["Latest Signal Date", "Selected Asset", "Signal", "Rule Match Score", "Vote", "Reason"]
     ]
     st.dataframe(vote_df, use_container_width=True)
 
@@ -1070,7 +1072,7 @@ def build_all_strategy_signals_table(results):
                 "Strategy Name": strategy_name,
                 "Latest Signal": signal["Signal"],
                 "Selected ETF / Asset": signal["Selected Asset"],
-                "Signal Strength": signal["Signal Strength"],
+                "Rule Match Score": signal["Rule Match Score"],
                 "Reason": signal["Reason"],
                 "Strategy Return": result["metrics"]["total_return"] * 100,
                 "SPY Return": benchmark_total_return(result) * 100,
@@ -1096,7 +1098,7 @@ def render_combined_signal_section(combined_signal, results):
         st.dataframe(
             signal_table.style.format(
                 {
-                    "Signal Strength": "{:.1f}",
+                    "Rule Match Score": "{:.1f}",
                     "Strategy Return": "{:.2f}%",
                     "SPY Return": "{:.2f}%",
                     "Sharpe Ratio": "{:.2f}",
@@ -1207,6 +1209,12 @@ def build_hypothetical_portfolio_tracker(close, transaction_cost=0.0005, ma_symb
 
 def render_workflow_diagram():
     st.subheader("Workflow Diagram")
+    st.write(
+        "Process Overview: The dashboard starts with market data inputs, calculates indicators and strategy features, "
+        "runs 10 strategy models, generates daily strategy signals, aggregates them into a combined signal, applies "
+        "the selected rebalance schedule, constructs a hypothetical $1MM portfolio, and tracks performance over time "
+        "versus the benchmark."
+    )
     steps = [
         ("Market Data Inputs", "ETF prices, benchmark, defensive assets"),
         ("Data Processing", "Returns, moving averages, RSI, volatility"),
@@ -1633,6 +1641,20 @@ def backtest_recommendation_framework(
 
 
 def render_recommendation_framework_backtest(portfolio_df, signal_history, rebalance_history, metrics, benchmark_symbol):
+    st.subheader("Actual Recommended Strategy")
+    st.markdown(
+        "**Actual Recommended Strategy: 10-Strategy Signal Aggregation with Scheduled Rebalancing**\n\n"
+        "This section backtests the actual recommendation process, not just the individual strategies. The recommended "
+        "strategy is the Recommendation Framework, which aggregates daily signals from all 10 strategy models into a "
+        "combined signal score. Daily signals are generated and stored for monitoring, but portfolio trades only occur "
+        "on the selected rebalance schedule, such as daily, weekly, or monthly. On each rebalance date, the framework "
+        "looks back over the selected signal aggregation window and uses the average combined signal score to decide "
+        "whether to allocate to a risk-on ETF, hold the current allocation, or move to cash / defensive assets.\n\n"
+        "The recommended strategy is used only on the selected rebalance dates. It uses the previous N trading days of "
+        "combined signal history to make the allocation decision.\n\n"
+        "To avoid look-ahead bias, signals are generated using only data available up to that date. Rebalance decisions "
+        "use only prior signal history, and trades are assumed to execute on the next trading day."
+    )
     st.subheader("Recommendation Framework Backtest")
     st.write(
         "Daily signals are generated for monitoring and stored as signal history. Portfolio trades only occur on the selected rebalance schedule. "
@@ -1657,6 +1679,10 @@ def render_recommendation_framework_backtest(portfolio_df, signal_history, rebal
     st.write(
         f"**Recent signal breakdown:** BUY {recent_counts['BUY']} | HOLD {recent_counts['HOLD']} | RISK-OFF {recent_counts['RISK-OFF']}"
     )
+    st.write(
+        "The hypothetical $1MM portfolio is driven by the Recommendation Framework. It does not trade every daily signal. "
+        "Instead, it updates allocation only on the selected rebalance schedule using the recent combined signal history."
+    )
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=portfolio_df.index, y=portfolio_df["Portfolio Value"], name="Recommendation Portfolio", line=dict(width=2)))
@@ -1671,12 +1697,22 @@ def render_recommendation_framework_backtest(portfolio_df, signal_history, rebal
     st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Signal History")
+    st.write(
+        "Daily signals are generated for monitoring and stored as signal history. They do not necessarily trigger daily trades. "
+        "Actual portfolio trades only occur based on the selected rebalance frequency. The rebalance decision uses the recent "
+        "signal history, not just a single day’s signal."
+    )
     st.dataframe(
         signal_history.reset_index().tail(120).style.format({"Combined Signal Score": "{:.2f}"}),
         use_container_width=True,
     )
 
     st.subheader("Rebalance History")
+    st.write(
+        "Daily signals are generated for monitoring and stored as signal history. They do not necessarily trigger daily trades. "
+        "Actual portfolio trades only occur based on the selected rebalance frequency. The rebalance decision uses the recent "
+        "signal history, not just a single day’s signal."
+    )
     if rebalance_history.empty:
         st.warning("No rebalance history is available.")
     else:
@@ -1915,7 +1951,7 @@ def main():
     all_etf_symbols = get_all_etf_symbols()
     ma_default_index = all_etf_symbols.index("SPY") if "SPY" in all_etf_symbols else 0
     ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
-    summary_strategy = st.sidebar.selectbox("Top Summary Strategy", STRATEGY_TYPES, index=0)
+    selected_summary_strategy = st.sidebar.selectbox("Selected Strategy Summary", STRATEGY_TYPES, index=0)
     backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
     rebalance_frequency = st.sidebar.selectbox("Rebalance Frequency", REBALANCE_FREQUENCIES, index=2)
     signal_window = st.sidebar.selectbox("Signal Aggregation Window", SIGNAL_AGGREGATION_WINDOWS, index=2)
@@ -2054,8 +2090,8 @@ def main():
             strategy_signals = {name: result["signal"] for name, result in available_results.items()}
             combined_signal = combine_strategy_signals(strategy_signals)
 
-            if summary_strategy in available_results:
-                render_top_strategy_summary(available_results[summary_strategy])
+            if selected_summary_strategy in available_results:
+                render_top_strategy_summary(available_results[selected_summary_strategy])
 
             render_combined_signal_section(combined_signal, comparison_results)
             with st.spinner("Backtesting recommendation framework..."):
@@ -2083,12 +2119,12 @@ def main():
                     result = comparison_results[comparison_strategy]
                     if result is None:
                         st.error("Backtest failed due to insufficient historical data for this strategy.")
-                    elif comparison_strategy != summary_strategy:
+                    elif comparison_strategy != selected_summary_strategy:
                         render_signal_card(result["signal"])
                         strategy_return = result["metrics"]["total_return"] * 100
                         spy_return = benchmark_total_return(result) * 100
                         st.write(f"**Backtest performance vs SPY:** {strategy_return:.2f}% vs {spy_return:.2f}%")
-                        st.info("Select this strategy in the sidebar Top Summary Strategy control to render its full charts and tables.")
+                        st.info("Select this strategy in the sidebar Selected Strategy Summary control to render its full charts and tables.")
                     else:
                         render_strategy_tab(result)
 
