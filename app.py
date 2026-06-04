@@ -980,6 +980,19 @@ def run_strategy_backtest(strategy_type, close, transaction_cost, ma_symbol="SPY
     return backtest_strategy(strategy_type, close, transaction_cost, ma_symbol=ma_symbol, benchmark_symbol=benchmark_symbol)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_all_strategy_backtests(close, transaction_cost, ma_symbol="SPY"):
+    results = {}
+    for strategy_type in STRATEGY_TYPES:
+        results[strategy_type] = backtest_strategy(
+            strategy_type,
+            close,
+            transaction_cost,
+            ma_symbol=ma_symbol,
+        )
+    return results
+
+
 def build_strategy_summary(result):
     metrics = result["metrics"]
     holdings = ", ".join(result["current_holdings"]) if result["current_holdings"] else "Cash"
@@ -1420,7 +1433,8 @@ def main():
 
         backtest_end = pd.Timestamp.today().normalize()
         backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
-        backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | set(DEFENSIVE_ETFS) | set(RISK_ON_ETFS) | {"SPY", "SHY", ma_symbol}))
+        required_strategy_symbols = {"SPY", "SHY", ma_symbol} | set(DEFENSIVE_ETFS)
+        backtest_symbols = tuple(sorted(set(selected_tickers) | required_strategy_symbols))
 
         with st.spinner("Downloading backtest price data..."):
             backtest_close = load_backtest_data(
@@ -1437,10 +1451,8 @@ def main():
                 f"{backtest_close.index.min().date()} to {backtest_close.index.max().date()}."
             )
 
-            comparison_results = {}
-            for comparison_strategy in STRATEGY_TYPES:
-                comparison_results[comparison_strategy] = run_strategy_backtest(
-                    comparison_strategy,
+            with st.spinner("Calculating 10 strategy backtests..."):
+                comparison_results = run_all_strategy_backtests(
                     backtest_close,
                     transaction_cost,
                     ma_symbol=ma_symbol,
@@ -1462,6 +1474,12 @@ def main():
                     result = comparison_results[comparison_strategy]
                     if result is None:
                         st.error("Backtest failed due to insufficient historical data for this strategy.")
+                    elif comparison_strategy != summary_strategy:
+                        render_signal_card(result["signal"])
+                        strategy_return = result["metrics"]["total_return"] * 100
+                        spy_return = benchmark_total_return(result) * 100
+                        st.write(f"**Backtest performance vs SPY:** {strategy_return:.2f}% vs {spy_return:.2f}%")
+                        st.info("Select this strategy in the sidebar Top Summary Strategy control to render its full charts and tables.")
                     else:
                         render_strategy_tab(result)
 
