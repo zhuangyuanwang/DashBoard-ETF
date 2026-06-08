@@ -45,6 +45,22 @@ SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_TYPES
 
 DEFENSIVE_ETFS = ["TLT", "IEF", "GLD", "SHY", "XLV", "XLU"]
 RISK_ON_ETFS = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLY", "XLI", "XLC", "EFA", "EEM"]
+PORTFOLIO_INCEPTION_DATE = pd.Timestamp("2026-06-04")
+BUY_TRANSACTION_COST = 0.0005
+SELL_TRANSACTION_COST = 0.0005
+
+ALPHA_STRATEGIES = [
+    {"name": "Overnight Mean Reversion", "category": "Mean Reversion"},
+    {"name": "Short-Term Momentum", "category": "Momentum"},
+    {"name": "Intraday Reversal", "category": "Mean Reversion"},
+    {"name": "Typical Price Reversion", "category": "Price-Volume"},
+    {"name": "Volume Spike Reversal", "category": "Price-Volume"},
+    {"name": "High-Low Range Breakout", "category": "Breakout"},
+    {"name": "Low Volatility Rotation Alpha", "category": "Risk Control"},
+    {"name": "Rank-Based Momentum", "category": "Cross-Sectional"},
+    {"name": "Price-Volume Confirmation", "category": "Price-Volume"},
+    {"name": "Correlation Diversification Alpha", "category": "Diversification"},
+]
 
 BACKTEST_PERIODS = {
     "3 Years": 3,
@@ -162,6 +178,39 @@ def load_backtest_data(symbols, start_date, end_date):
     if df.empty:
         return pd.DataFrame()
     return extract_close_prices(df, symbols)
+
+
+def extract_price_field(df, field, symbols):
+    if field not in df:
+        return pd.DataFrame()
+    values = df[field].copy()
+    if isinstance(values, pd.Series):
+        values = values.to_frame(name=symbols[0])
+    values = values.dropna(how="all")
+    return values
+
+
+@st.cache_data(ttl=3600)
+def load_ohlcv_data(symbols, start_date, end_date):
+    symbols = tuple(sorted(set(symbols)))
+    df = yf.download(
+        symbols,
+        start=start_date,
+        end=end_date,
+        interval="1d",
+        auto_adjust=True,
+        threads=True,
+        progress=False,
+    )
+    if df.empty:
+        return {}
+    return {
+        "open": extract_price_field(df, "Open", symbols),
+        "high": extract_price_field(df, "High", symbols),
+        "low": extract_price_field(df, "Low", symbols),
+        "close": extract_price_field(df, "Close", symbols),
+        "volume": extract_price_field(df, "Volume", symbols),
+    }
 
 
 def calculate_performance_metrics(strategy_equity, strategy_returns, number_rebalances):
@@ -1524,6 +1573,400 @@ def calculate_win_rate(returns):
     return (returns > 0).mean()
 
 
+def normalize_alpha_weights(score_row, close_columns, allow_defensive=True):
+    weights = pd.Series(0.0, index=close_columns)
+    scores = score_row.dropna().sort_values(ascending=False)
+    if scores.empty:
+        return weights
+    top_asset = scores.index[0]
+    top_score = scores.iloc[0]
+    if top_score > 0:
+        weights[top_asset] = 1.0
+    elif allow_defensive and "SHY" in weights.index:
+        weights["SHY"] = 1.0
+    return weights
+
+
+def calculate_alpha_scores(alpha_name, ohlcv):
+    open_price = ohlcv["open"]
+    high = ohlcv["high"]
+    low = ohlcv["low"]
+    close = ohlcv["close"]
+    volume = ohlcv["volume"]
+    returns = close.pct_change()
+    typical_price = (high + low + close) / 3
+
+    if alpha_name == "Overnight Mean Reversion":
+        gap = open_price / close.shift(1) - 1
+        return -gap
+    if alpha_name == "Short-Term Momentum":
+        return close.pct_change(5)
+    if alpha_name == "Intraday Reversal":
+        intraday_move = close / open_price - 1
+        return -intraday_move
+    if alpha_name == "Typical Price Reversion":
+        distance = close / typical_price - 1
+        return -distance
+    if alpha_name == "Volume Spike Reversal":
+        volume_z = (volume - volume.rolling(20).mean()) / volume.rolling(20).std()
+        extreme_move = returns
+        return -(volume_z.clip(lower=0) * extreme_move)
+    if alpha_name == "High-Low Range Breakout":
+        breakout = close / close.rolling(20).max().shift(1) - 1
+        breakdown = close / close.rolling(20).min().shift(1) - 1
+        return breakout.where(breakout > 0, breakdown)
+    if alpha_name == "Low Volatility Rotation Alpha":
+        vol = returns.rolling(20).std() * np.sqrt(252)
+        return -vol
+    if alpha_name == "Rank-Based Momentum":
+        return close.pct_change(10).rank(axis=1, pct=True) - 0.5
+    if alpha_name == "Price-Volume Confirmation":
+        momentum = close.pct_change(5)
+        volume_trend = volume / volume.rolling(20).mean() - 1
+        return momentum * volume_trend
+    if alpha_name == "Correlation Diversification Alpha":
+        scores = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
+        for date in close.index:
+            window = returns.loc[:date].tail(60)
+            if len(window.dropna(how="all")) < 20:
+                continue
+            corr = window.corr().abs()
+            corr = corr.mask(np.eye(len(corr), dtype=bool))
+            scores.loc[date] = -corr.mean()
+        return scores
+    return pd.DataFrame(index=close.index, columns=close.columns)
+
+
+def calculate_alpha_weights(alpha_name, ohlcv):
+    close = ohlcv["close"]
+    scores = calculate_alpha_scores(alpha_name, ohlcv)
+    weight_rows = [normalize_alpha_weights(scores.loc[date], close.columns) for date in scores.index]
+    weights = pd.DataFrame(weight_rows, index=scores.index).reindex(columns=close.columns)
+    weights = weights.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return scores, weights
+
+
+def calculate_return_metrics(returns):
+    returns = returns.dropna()
+    if returns.empty:
+        return {
+            "total_return": np.nan,
+            "annualized_return": np.nan,
+            "volatility": np.nan,
+            "sharpe": np.nan,
+            "max_drawdown": np.nan,
+            "current_drawdown": np.nan,
+        }
+    equity = (1 + returns).cumprod()
+    years = (returns.index[-1] - returns.index[0]).days / 365.25
+    total_return = equity.iloc[-1] - 1
+    annualized_return = equity.iloc[-1] ** (1 / years) - 1 if years > 0 else np.nan
+    volatility = returns.std() * np.sqrt(252)
+    sharpe = returns.mean() * 252 / volatility if volatility and volatility > 0 else np.nan
+    drawdown = equity / equity.cummax() - 1
+    return {
+        "total_return": total_return,
+        "annualized_return": annualized_return,
+        "volatility": volatility,
+        "sharpe": sharpe,
+        "max_drawdown": drawdown.min(),
+        "current_drawdown": drawdown.iloc[-1],
+    }
+
+
+def classify_alpha_status(metrics, turnover, cost_drag, correlation):
+    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] < -0.25:
+        return "Pause"
+    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] < -0.15:
+        return "Reduce"
+    if pd.notna(metrics["sharpe"]) and metrics["sharpe"] < 0:
+        return "Watch"
+    if turnover > 1.5 or cost_drag > 0.03 or abs(correlation) > 0.85:
+        return "Watch"
+    return "Healthy"
+
+
+def build_alpha_allocations(alpha_results, net_returns_df, max_alpha_allocation, allocation_method):
+    eligible = [name for name, result in alpha_results.items() if result["status"] != "Pause"]
+    allocations = pd.Series(0.0, index=alpha_results.keys(), dtype=float)
+    if not eligible:
+        return allocations
+
+    if allocation_method == "Volatility Scaled":
+        vols = net_returns_df[eligible].std() * np.sqrt(252)
+        raw = 1 / vols.replace(0, np.nan)
+        raw = raw.replace([np.inf, -np.inf], np.nan).dropna()
+        if raw.empty:
+            raw = pd.Series(1.0, index=eligible)
+        weights = raw / raw.sum()
+    else:
+        weights = pd.Series(1 / len(eligible), index=eligible)
+
+    for name, weight in weights.items():
+        adjusted_weight = min(weight, max_alpha_allocation)
+        if alpha_results[name]["status"] == "Reduce":
+            adjusted_weight *= 0.5
+        allocations[name] = adjusted_weight
+    return allocations
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_multi_alpha_backtest(ohlcv, initial_capital=1_000_000, max_alpha_allocation=0.10, allocation_method="Equal Weight"):
+    close = ohlcv["close"].dropna(how="all")
+    asset_returns = close.pct_change().dropna()
+    if asset_returns.empty:
+        return {}, pd.DataFrame(), pd.DataFrame(), {}
+
+    alpha_results = {}
+    net_returns = {}
+    gross_returns = {}
+    latest_allocations = {}
+
+    for alpha in ALPHA_STRATEGIES:
+        name = alpha["name"]
+        scores, target_weights = calculate_alpha_weights(name, ohlcv)
+        target_weights = target_weights.reindex(asset_returns.index).fillna(0.0)
+        execution_weights = target_weights.shift(1).fillna(0.0)
+        gross = (execution_weights * asset_returns).sum(axis=1)
+        weight_change = execution_weights.diff().fillna(execution_weights)
+        buy_turnover = weight_change.clip(lower=0).sum(axis=1)
+        sell_turnover = (-weight_change.clip(upper=0)).sum(axis=1)
+        trading_cost = buy_turnover * BUY_TRANSACTION_COST + sell_turnover * SELL_TRANSACTION_COST
+        net = gross - trading_cost
+        gross_returns[name] = gross
+        net_returns[name] = net
+
+        metrics = calculate_return_metrics(net)
+        gross_metrics = calculate_return_metrics(gross)
+        turnover = (buy_turnover + sell_turnover).mean() * 252
+        cost_drag = trading_cost.sum()
+        latest_weights = target_weights.iloc[-1]
+        selected_asset = latest_weights[latest_weights > 0].index[0] if (latest_weights > 0).any() else "Cash"
+        signal_value = scores.reindex(target_weights.index).iloc[-1].dropna()
+        current_signal = "BUY" if selected_asset != "Cash" and signal_value.max() > 0 else "CASH"
+        latest_allocations[name] = latest_weights
+
+        alpha_results[name] = {
+            "category": alpha["category"],
+            "scores": scores,
+            "target_weights": target_weights,
+            "execution_weights": execution_weights,
+            "gross_returns": gross,
+            "net_returns": net,
+            "trading_cost": trading_cost,
+            "turnover": buy_turnover + sell_turnover,
+            "metrics": metrics,
+            "gross_metrics": gross_metrics,
+            "cost_drag": cost_drag,
+            "selected_asset": selected_asset,
+            "current_signal": current_signal,
+            "signal_history": signal_value,
+        }
+
+    net_returns_df = pd.DataFrame(net_returns).dropna(how="all")
+    gross_returns_df = pd.DataFrame(gross_returns).dropna(how="all")
+    initial_portfolio_net_returns = net_returns_df.mean(axis=1)
+    for name, result in alpha_results.items():
+        corr = net_returns_df[name].corr(initial_portfolio_net_returns) if name in net_returns_df else np.nan
+        result["correlation_with_portfolio"] = corr
+        result["status"] = classify_alpha_status(result["metrics"], result["turnover"].mean() * 252, result["cost_drag"], corr)
+
+    alpha_allocations = build_alpha_allocations(alpha_results, net_returns_df, max_alpha_allocation, allocation_method)
+    portfolio_net_returns = net_returns_df.mul(alpha_allocations, axis=1).sum(axis=1)
+    portfolio_gross_returns = gross_returns_df.mul(alpha_allocations, axis=1).sum(axis=1)
+    portfolio_equity = initial_capital * (1 + portfolio_net_returns).cumprod()
+    portfolio_gross_equity = initial_capital * (1 + portfolio_gross_returns).cumprod()
+    portfolio_metrics = calculate_return_metrics(portfolio_net_returns)
+    portfolio_metrics["gross_return"] = portfolio_gross_equity.iloc[-1] / initial_capital - 1 if not portfolio_gross_equity.empty else np.nan
+    portfolio_metrics["net_return"] = portfolio_equity.iloc[-1] / initial_capital - 1 if not portfolio_equity.empty else np.nan
+    portfolio_metrics["transaction_cost_drag"] = portfolio_metrics["gross_return"] - portfolio_metrics["net_return"]
+    portfolio_metrics["portfolio_value"] = portfolio_equity.iloc[-1] if not portfolio_equity.empty else initial_capital
+    portfolio_metrics["total_pnl"] = portfolio_metrics["portfolio_value"] - initial_capital
+    portfolio_metrics["total_turnover"] = sum(result["turnover"].sum() * alpha_allocations[name] for name, result in alpha_results.items())
+    portfolio_metrics["allocation_method"] = allocation_method
+    portfolio_metrics["cash_weight"] = max(0.0, 1 - alpha_allocations.sum())
+
+    portfolio_returns = pd.DataFrame(
+        {
+            "Portfolio Gross Return": portfolio_gross_returns,
+            "Portfolio Net Return": portfolio_net_returns,
+            "Portfolio Value": portfolio_equity,
+            "Portfolio Gross Value": portfolio_gross_equity,
+        }
+    )
+
+    correlations = net_returns_df.corr()
+    for name, result in alpha_results.items():
+        corr = net_returns_df[name].corr(portfolio_net_returns) if name in net_returns_df else np.nan
+        result["correlation_with_portfolio"] = corr
+        result["allocation"] = alpha_allocations[name]
+
+    return alpha_results, portfolio_returns, correlations, portfolio_metrics
+
+
+def build_alpha_monitoring_table(alpha_results, portfolio_returns):
+    portfolio_net = portfolio_returns["Portfolio Net Return"] if "Portfolio Net Return" in portfolio_returns else pd.Series(dtype=float)
+    rows = []
+    for name, result in alpha_results.items():
+        metrics = result["metrics"]
+        gross_metrics = result["gross_metrics"]
+        latest_net = result["net_returns"].dropna()
+        daily_pnl = latest_net.iloc[-1] * result["allocation"] * 1_000_000 if not latest_net.empty else 0
+        cumulative_pnl = metrics["total_return"] * result["allocation"] * 1_000_000 if pd.notna(metrics["total_return"]) else np.nan
+        rows.append(
+            {
+                "Alpha name": name,
+                "Category": result["category"],
+                "Current signal": result["current_signal"],
+                "Current allocation": result["allocation"],
+                "Position": result["selected_asset"],
+                "Daily PnL": daily_pnl,
+                "Cumulative PnL": cumulative_pnl,
+                "Gross return": gross_metrics["total_return"],
+                "Net return": metrics["total_return"],
+                "Sharpe ratio": metrics["sharpe"],
+                "Max drawdown": metrics["max_drawdown"],
+                "Turnover": result["turnover"].sum(),
+                "Transaction cost drag": result["cost_drag"],
+                "Correlation with portfolio": result["correlation_with_portfolio"],
+                "Status": result["status"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_portfolio_overview(alpha_results, portfolio_returns, portfolio_metrics):
+    st.header("Portfolio Overview")
+    st.write(
+        "Multi-alpha portfolio starting from 2026-06-04 with $1,000,000 initial capital. "
+        "Gross returns are shown before transaction costs; net returns include 5 bps buy cost and 5 bps sell cost."
+    )
+    if portfolio_returns.empty:
+        st.warning("Multi-alpha portfolio results are unavailable for the current data.")
+        return
+
+    active_count = sum(1 for result in alpha_results.values() if result["status"] == "Healthy")
+    watch_count = sum(1 for result in alpha_results.values() if result["status"] in ["Watch", "Reduce", "Pause"])
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Portfolio Value", f"${portfolio_metrics['portfolio_value']:,.0f}")
+    c2.metric("Total PnL", f"${portfolio_metrics['total_pnl']:,.0f}")
+    c3.metric("Gross Return", f"{portfolio_metrics['gross_return'] * 100:.2f}%")
+    c4.metric("Net Return", f"{portfolio_metrics['net_return'] * 100:.2f}%")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Portfolio Sharpe", f"{portfolio_metrics['sharpe']:.2f}")
+    c6.metric("Volatility", f"{portfolio_metrics['volatility'] * 100:.2f}%")
+    c7.metric("Max Drawdown", f"{portfolio_metrics['max_drawdown'] * 100:.2f}%")
+    c8.metric("Current Drawdown", f"{portfolio_metrics['current_drawdown'] * 100:.2f}%")
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("Total Turnover", f"{portfolio_metrics['total_turnover']:.2f}x")
+    c10.metric("Cost Drag", f"{portfolio_metrics['transaction_cost_drag'] * 100:.2f}%")
+    c11.metric("Active Alphas", str(active_count))
+    c12.metric("Alphas on Watch", str(watch_count))
+    st.caption(
+        f"Portfolio construction: {portfolio_metrics.get('allocation_method', 'Equal Weight')} with "
+        f"{portfolio_metrics.get('cash_weight', 0) * 100:.1f}% unallocated cash after alpha caps and risk status rules."
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=portfolio_returns.index, y=portfolio_returns["Portfolio Value"], name="Net Portfolio Value", line=dict(width=2)))
+    fig.add_trace(go.Scatter(x=portfolio_returns.index, y=portfolio_returns["Portfolio Gross Value"], name="Gross Portfolio Value", line=dict(width=2, dash="dash")))
+    fig.update_layout(title="Portfolio Equity Curve", xaxis_title="Date", yaxis_title="Value ($)", template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    drawdown = portfolio_returns["Portfolio Value"] / portfolio_returns["Portfolio Value"].cummax() - 1
+    dd_fig = px.area(x=drawdown.index, y=drawdown, title="Portfolio Drawdown")
+    dd_fig.update_layout(xaxis_title="Date", yaxis_title="Drawdown", template="plotly_white")
+    st.plotly_chart(dd_fig, use_container_width=True)
+
+    contribution_rows = []
+    for name, result in alpha_results.items():
+        contribution_rows.append({"Alpha": name, "PnL Contribution": result["metrics"]["total_return"] * result["allocation"] * 1_000_000})
+    contribution_df = pd.DataFrame(contribution_rows).sort_values("PnL Contribution", ascending=False)
+    st.plotly_chart(px.bar(contribution_df, x="Alpha", y="PnL Contribution", title="Alpha Contribution to PnL"), use_container_width=True)
+
+
+def render_alpha_live_monitoring(alpha_results, portfolio_returns):
+    st.header("Alpha Live Monitoring")
+    table = build_alpha_monitoring_table(alpha_results, portfolio_returns)
+    if table.empty:
+        st.warning("Alpha monitoring data is unavailable.")
+        return
+    st.dataframe(
+        table.style.format(
+            {
+                "Current allocation": "{:.2%}",
+                "Daily PnL": "${:,.0f}",
+                "Cumulative PnL": "${:,.0f}",
+                "Gross return": "{:.2%}",
+                "Net return": "{:.2%}",
+                "Sharpe ratio": "{:.2f}",
+                "Max drawdown": "{:.2%}",
+                "Turnover": "{:.2f}",
+                "Transaction cost drag": "{:.2%}",
+                "Correlation with portfolio": "{:.2f}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+    selected_alpha = st.selectbox("Select Alpha Detail", table["Alpha name"].tolist())
+    result = alpha_results[selected_alpha]
+    net_equity = (1 + result["net_returns"].dropna()).cumprod()
+    gross_equity = (1 + result["gross_returns"].dropna()).cumprod()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=net_equity.index, y=net_equity, name="Net"))
+    fig.add_trace(go.Scatter(x=gross_equity.index, y=gross_equity, name="Gross", line=dict(dash="dash")))
+    fig.update_layout(title=f"{selected_alpha} Gross vs Net Performance", template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    drawdown = net_equity / net_equity.cummax() - 1
+    st.plotly_chart(px.area(x=drawdown.index, y=drawdown, title=f"{selected_alpha} Drawdown"), use_container_width=True)
+    rolling_sharpe = result["net_returns"].rolling(63).mean() * 252 / (result["net_returns"].rolling(63).std() * np.sqrt(252))
+    st.plotly_chart(px.line(x=rolling_sharpe.index, y=rolling_sharpe, title=f"{selected_alpha} Rolling Sharpe"), use_container_width=True)
+    st.plotly_chart(px.line(x=result["turnover"].index, y=result["turnover"], title=f"{selected_alpha} Daily Turnover"), use_container_width=True)
+    st.write(f"**Current explanation:** {selected_alpha} currently selects **{result['selected_asset']}** with signal **{result['current_signal']}**.")
+    st.dataframe(result["target_weights"].tail(30), use_container_width=True)
+
+
+def render_alpha_correlation(alpha_results, correlations, portfolio_returns):
+    st.header("Alpha Correlation")
+    if correlations.empty:
+        st.warning("Alpha correlation data is unavailable.")
+        return
+    st.plotly_chart(px.imshow(correlations, text_auto=".2f", title="Alpha Correlation Matrix", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
+    upper = correlations.where(np.triu(np.ones(correlations.shape), k=1).astype(bool)).stack()
+    high_corr = upper[upper.abs() > 0.8]
+    if not high_corr.empty:
+        st.warning("Concentration warning: several alpha pairs have absolute correlation above 0.80. High Sharpe alphas should not be automatically overweighted when correlation is high.")
+
+    net_returns_df = pd.DataFrame({name: result["net_returns"] for name, result in alpha_results.items()}).dropna(how="all")
+    rolling_avg_corr = net_returns_df.rolling(63).corr().groupby(level=0).mean().mean(axis=1)
+    st.plotly_chart(px.line(x=rolling_avg_corr.index, y=rolling_avg_corr, title="Rolling Average Alpha Correlation"), use_container_width=True)
+
+    contribution = []
+    portfolio_net = portfolio_returns["Portfolio Net Return"]
+    for name, result in alpha_results.items():
+        contribution.append(
+            {
+                "Alpha": name,
+                "Return Contribution": result["metrics"]["total_return"] * result["allocation"],
+                "Risk Contribution Proxy": result["net_returns"].std() * result["allocation"],
+            }
+        )
+    contribution_df = pd.DataFrame(contribution)
+    if not contribution_df.empty and contribution_df["Risk Contribution Proxy"].max() > contribution_df["Risk Contribution Proxy"].sum() * 0.35:
+        st.warning("Risk concentration warning: one alpha contributes a large share of total risk.")
+    st.dataframe(contribution_df, use_container_width=True)
+
+
+def render_alpha_backtesting(alpha_results, portfolio_returns, portfolio_metrics):
+    st.header("Backtesting")
+    render_portfolio_overview(alpha_results, portfolio_returns, portfolio_metrics)
+    table = build_alpha_monitoring_table(alpha_results, portfolio_returns)
+    st.subheader("Strategy-Level Backtest Summary")
+    st.dataframe(table, use_container_width=True)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def backtest_recommendation_framework(
     close,
@@ -1959,15 +2402,40 @@ def main():
     benchmark_symbol = st.sidebar.selectbox("Benchmark", all_etf_symbols, index=ma_default_index)
     transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps)", min_value=0, max_value=100, value=5, step=1)
     transaction_cost = transaction_cost_bps / 10000
+    allocation_method = st.sidebar.selectbox("Alpha Allocation Method", ["Equal Weight", "Volatility Scaled"], index=0)
+    max_alpha_allocation = st.sidebar.slider("Max Allocation per Alpha", min_value=0.05, max_value=0.25, value=0.10, step=0.01)
     st.sidebar.markdown("---")
     st.sidebar.write("**ETF universe includes:**")
     for category, tickers in ETF_UNIVERSE.items():
         st.sidebar.write(f"- **{category}**: {', '.join(tickers)}")
 
+    backtest_end = pd.Timestamp.today().normalize()
+    backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
+    required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
+    alpha_symbols = tuple(sorted(set(selected_tickers) | required_strategy_symbols))
+
     close = load_data(selected_tickers, history_period)
     if close.empty:
         st.error("Failed to load data. Please try again or select fewer tickers.")
         return
+
+    with st.spinner("Loading multi-alpha market data..."):
+        alpha_ohlcv = load_ohlcv_data(
+            alpha_symbols,
+            backtest_start.strftime("%Y-%m-%d"),
+            backtest_end.strftime("%Y-%m-%d"),
+        )
+    if not alpha_ohlcv or alpha_ohlcv["close"].empty:
+        st.error("Failed to load multi-alpha OHLCV data.")
+        return
+
+    with st.spinner("Running multi-alpha portfolio backtest..."):
+        alpha_results, alpha_portfolio_returns, alpha_correlations, alpha_portfolio_metrics = run_multi_alpha_backtest(
+            alpha_ohlcv,
+            initial_capital=initial_portfolio_value,
+            max_alpha_allocation=max_alpha_allocation,
+            allocation_method=allocation_method,
+        )
 
     returns = compute_returns(close)
     performance = compute_performance(close)
@@ -1979,8 +2447,30 @@ def main():
     highest_vol = volatility.sort_values(ascending=False).index[0]
     bullish_count = len(signal[signal == "Bullish"])
 
-    main_tabs = st.tabs(["Overview", "Category Charts", "Strategy Testing"])
-    overview_tab, category_tab, strategy_tab = main_tabs
+    main_tabs = st.tabs(
+        [
+            "Portfolio Overview",
+            "Alpha Live Monitoring",
+            "Alpha Correlation",
+            "Backtesting",
+            "Market Overview",
+            "Category Charts",
+            "Strategy Testing",
+        ]
+    )
+    portfolio_tab, alpha_monitoring_tab, alpha_correlation_tab, alpha_backtesting_tab, overview_tab, category_tab, strategy_tab = main_tabs
+
+    with portfolio_tab:
+        render_portfolio_overview(alpha_results, alpha_portfolio_returns, alpha_portfolio_metrics)
+
+    with alpha_monitoring_tab:
+        render_alpha_live_monitoring(alpha_results, alpha_portfolio_returns)
+
+    with alpha_correlation_tab:
+        render_alpha_correlation(alpha_results, alpha_correlations, alpha_portfolio_returns)
+
+    with alpha_backtesting_tab:
+        render_alpha_backtesting(alpha_results, alpha_portfolio_returns, alpha_portfolio_metrics)
 
     with overview_tab:
         st.subheader("Overview Metrics")
@@ -2058,23 +2548,13 @@ def main():
         st.write("Each strategy uses the same cached backtest price data and avoids look-ahead bias by trading after the signal date.")
         st.divider()
 
-        backtest_end = pd.Timestamp.today().normalize()
-        backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
-        required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
-        backtest_symbols = tuple(sorted(set(selected_tickers) | required_strategy_symbols))
-
-        with st.spinner("Downloading backtest price data..."):
-            backtest_close = load_backtest_data(
-                backtest_symbols,
-                backtest_start.strftime("%Y-%m-%d"),
-                backtest_end.strftime("%Y-%m-%d"),
-            )
+        backtest_close = alpha_ohlcv["close"].copy()
 
         if backtest_close.empty:
             st.error("Unable to load backtest data. Please try again later.")
         else:
             st.caption(
-                f"Backtest data loaded once for {len(backtest_close.columns)} ETFs from "
+                f"Backtest data reused from the shared cached OHLCV download for {len(backtest_close.columns)} ETFs from "
                 f"{backtest_close.index.min().date()} to {backtest_close.index.max().date()}."
             )
             render_workflow_diagram()
