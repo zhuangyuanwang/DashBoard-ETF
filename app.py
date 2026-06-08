@@ -1706,12 +1706,7 @@ def build_strategy_allocations(results):
             get_max_strategy_correlation(strategy_name, correlations),
             risk_contributions.get(strategy_name, np.nan),
         )
-    active = [strategy_name for strategy_name, status in statuses.items() if status != "Pause"]
-    if not active:
-        active = list(results.keys())
-    allocations = pd.Series(0.0, index=results.keys(), dtype=float)
-    for strategy_name in active:
-        allocations[strategy_name] = 1 / len(active)
+    allocations = pd.Series(1 / max(1, len(results)), index=results.keys(), dtype=float)
     return allocations, statuses
 
 
