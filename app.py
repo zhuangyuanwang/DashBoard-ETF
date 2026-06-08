@@ -41,7 +41,23 @@ STRATEGY_TYPES = [
     "Equal Weight Multi-ETF Strategy",
 ]
 
-SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_TYPES
+FORMULAIC_ALPHA_SLEEVE = "Formulaic Alpha Sleeve"
+STRATEGY_SLEEVE_TYPES = STRATEGY_TYPES + [FORMULAIC_ALPHA_SLEEVE]
+
+FORMULAIC_ALPHA_DEFINITIONS = [
+    {"name": "Open-Close Reversal Alpha", "category": "Reversal"},
+    {"name": "Overnight Gap Reversal Alpha", "category": "Reversal"},
+    {"name": "Short-Term Return Reversal Alpha", "category": "Reversal"},
+    {"name": "Volume Spike Reversal Alpha", "category": "Volume Reversal"},
+    {"name": "Typical Price Reversion Alpha", "category": "Reversion"},
+    {"name": "High-Low Range Breakout Alpha", "category": "Breakout"},
+    {"name": "Price-Volume Confirmation Alpha", "category": "Price-Volume"},
+    {"name": "Price-Volume Correlation Alpha", "category": "Price-Volume"},
+    {"name": "Low Volatility Reversal Alpha", "category": "Risk-Adjusted Reversal"},
+    {"name": "Rank-Based Multi-Factor Alpha", "category": "Multi-Factor"},
+]
+
+SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_SLEEVE_TYPES
 
 DEFENSIVE_ETFS = ["TLT", "IEF", "GLD", "SHY", "XLV", "XLU"]
 RISK_ON_ETFS = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLY", "XLI", "XLC", "EFA", "EEM"]
@@ -73,6 +89,15 @@ def extract_close_prices(df, symbols):
         close = close.to_frame(name=symbols[0])
     close = close.dropna(how="all")
     return close
+
+
+def extract_price_field(df, field, symbols):
+    if field not in df:
+        return pd.DataFrame()
+    values = df[field].copy()
+    if isinstance(values, pd.Series):
+        values = values.to_frame(name=symbols[0])
+    return values.dropna(how="all")
 
 
 @st.cache_data(ttl=3600)
@@ -166,6 +191,29 @@ def load_backtest_data(symbols, start_date, end_date):
     if df.empty:
         return pd.DataFrame()
     return extract_close_prices(df, symbols)
+
+
+@st.cache_data(ttl=3600)
+def load_backtest_ohlcv_data(symbols, start_date, end_date):
+    symbols = tuple(sorted(set(symbols)))
+    df = yf.download(
+        symbols,
+        start=start_date,
+        end=end_date,
+        interval="1d",
+        auto_adjust=True,
+        threads=True,
+        progress=False,
+    )
+    if df.empty:
+        return {}
+    return {
+        "open": extract_price_field(df, "Open", symbols),
+        "high": extract_price_field(df, "High", symbols),
+        "low": extract_price_field(df, "Low", symbols),
+        "close": extract_price_field(df, "Close", symbols),
+        "volume": extract_price_field(df, "Volume", symbols),
+    }
 
 
 
@@ -1039,6 +1087,251 @@ def run_all_strategy_backtests(close, transaction_cost, ma_symbol="SPY", benchma
     return results
 
 
+def cross_sectional_rank(df):
+    return df.rank(axis=1, pct=True)
+
+
+def rolling_pairwise_corr(left, right, window):
+    corr = pd.DataFrame(index=left.index, columns=left.columns, dtype=float)
+    for column in left.columns:
+        if column in right.columns:
+            corr[column] = left[column].rolling(window).corr(right[column])
+    return corr
+
+
+def calculate_formulaic_alpha_scores(alpha_name, ohlcv):
+    open_price = ohlcv["open"]
+    high = ohlcv["high"]
+    low = ohlcv["low"]
+    close = ohlcv["close"]
+    volume = ohlcv["volume"]
+    returns = close.pct_change()
+    typical_price = (high + low + close) / 3
+    adv20 = volume.rolling(20).mean()
+    vol20 = returns.rolling(20).std()
+
+    if alpha_name == "Open-Close Reversal Alpha":
+        return -1 * ((close - open_price) / open_price)
+    if alpha_name == "Overnight Gap Reversal Alpha":
+        gap = open_price / close.shift(1) - 1
+        return -1 * gap
+    if alpha_name == "Short-Term Return Reversal Alpha":
+        recent_return = close.pct_change(5)
+        return -1 * recent_return
+    if alpha_name == "Volume Spike Reversal Alpha":
+        volume_ratio = volume / adv20
+        price_move = close.pct_change(1)
+        return -1 * price_move * cross_sectional_rank(volume_ratio)
+    if alpha_name == "Typical Price Reversion Alpha":
+        distance = close / typical_price - 1
+        return -1 * distance
+    if alpha_name == "High-Low Range Breakout Alpha":
+        rolling_high = high.rolling(20).max().shift(1)
+        rolling_low = low.rolling(20).min().shift(1)
+        return close / rolling_high - close / rolling_low
+    if alpha_name == "Price-Volume Confirmation Alpha":
+        momentum = close.pct_change(5)
+        volume_change = volume.pct_change(5)
+        return momentum * cross_sectional_rank(volume_change)
+    if alpha_name == "Price-Volume Correlation Alpha":
+        price_ret = close.pct_change()
+        volume_ret = volume.pct_change()
+        corr = rolling_pairwise_corr(price_ret, volume_ret, 10)
+        return corr * close.pct_change(5)
+    if alpha_name == "Low Volatility Reversal Alpha":
+        recent_return = close.pct_change(5)
+        return -1 * recent_return / vol20.replace(0, np.nan)
+    if alpha_name == "Rank-Based Multi-Factor Alpha":
+        reversal_rank = cross_sectional_rank(-1 * close.pct_change(5))
+        volume_rank = cross_sectional_rank(volume / adv20)
+        volatility_rank = cross_sectional_rank(-1 * vol20)
+        trend_rank = cross_sectional_rank(close.pct_change(20))
+        return 0.35 * reversal_rank + 0.25 * trend_rank + 0.20 * volume_rank + 0.20 * volatility_rank
+    return pd.DataFrame(index=close.index, columns=close.columns)
+
+
+def scores_to_target_weights(scores, close_columns, top_n=3):
+    target_weights = pd.DataFrame(0.0, index=scores.index, columns=close_columns)
+    for date, row in scores.iterrows():
+        ranked = row.replace([np.inf, -np.inf], np.nan).dropna().sort_values(ascending=False)
+        if ranked.empty:
+            if "SHY" in target_weights.columns:
+                target_weights.at[date, "SHY"] = 1.0
+            continue
+        selected = ranked[ranked > 0].head(top_n).index.tolist()
+        if selected:
+            target_weights.loc[date, selected] = 1.0 / len(selected)
+        elif "SHY" in target_weights.columns:
+            target_weights.at[date, "SHY"] = 1.0
+    return target_weights
+
+
+def calculate_simple_return_metrics(returns):
+    returns = returns.dropna()
+    if returns.empty:
+        return {
+            "total_return": np.nan,
+            "volatility": np.nan,
+            "sharpe": np.nan,
+            "max_drawdown": np.nan,
+            "current_drawdown": np.nan,
+        }
+    equity = (1 + returns).cumprod()
+    volatility = returns.std() * np.sqrt(252)
+    sharpe = returns.mean() * 252 / volatility if volatility > 0 else np.nan
+    drawdown = equity / equity.cummax() - 1
+    return {
+        "total_return": equity.iloc[-1] - 1,
+        "volatility": volatility,
+        "sharpe": sharpe,
+        "max_drawdown": drawdown.min(),
+        "current_drawdown": drawdown.iloc[-1],
+    }
+
+
+def classify_formulaic_alpha_status(metrics, turnover, cost_drag, avg_correlation):
+    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] <= -0.25:
+        return "Pause"
+    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] <= -0.15:
+        return "Reduce"
+    if pd.notna(metrics["sharpe"]) and metrics["sharpe"] < 0:
+        return "Watch"
+    if turnover > 5 or cost_drag > 0.05 or abs(avg_correlation) > 0.85:
+        return "Watch"
+    return "Healthy"
+
+
+def run_single_formulaic_alpha(alpha, ohlcv, transaction_cost=DEFAULT_TRANSACTION_COST, top_n=3):
+    close = ohlcv["close"]
+    asset_returns = close.pct_change().dropna()
+    scores = calculate_formulaic_alpha_scores(alpha["name"], ohlcv).reindex(asset_returns.index)
+    target_weights = scores_to_target_weights(scores, close.columns, top_n=top_n).reindex(asset_returns.index).fillna(0.0)
+    execution_weights = target_weights.shift(1).fillna(0.0)
+    gross_returns = (execution_weights * asset_returns).sum(axis=1)
+
+    weight_change = execution_weights.diff().fillna(execution_weights)
+    buy_turnover = weight_change.clip(lower=0).sum(axis=1)
+    sell_turnover = (-weight_change.clip(upper=0)).sum(axis=1)
+    trading_costs = buy_turnover * BUY_TRANSACTION_COST + sell_turnover * SELL_TRANSACTION_COST
+    if transaction_cost != DEFAULT_TRANSACTION_COST:
+        trading_costs = buy_turnover * transaction_cost + sell_turnover * transaction_cost
+    net_returns = gross_returns - trading_costs
+
+    gross_metrics = calculate_simple_return_metrics(gross_returns)
+    net_metrics = calculate_simple_return_metrics(net_returns)
+    latest_weights = target_weights.iloc[-1] if not target_weights.empty else pd.Series(dtype=float)
+    selected = latest_weights[latest_weights > 0].index.tolist()
+    latest_score = scores.iloc[-1].replace([np.inf, -np.inf], np.nan).dropna() if not scores.empty else pd.Series(dtype=float)
+    current_signal = "BUY" if selected and (not latest_score.empty and latest_score.max() > 0) else "DEFENSIVE"
+
+    return {
+        "name": alpha["name"],
+        "category": alpha["category"],
+        "scores": scores,
+        "target_weights": target_weights,
+        "execution_weights": execution_weights,
+        "gross_returns": gross_returns,
+        "net_returns": net_returns,
+        "trading_costs": trading_costs,
+        "turnover": buy_turnover + sell_turnover,
+        "gross_metrics": gross_metrics,
+        "metrics": net_metrics,
+        "selected_etfs": selected or ["Cash"],
+        "current_signal": current_signal,
+        "cost_drag": gross_metrics["total_return"] - net_metrics["total_return"],
+    }
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_formulaic_alpha_sleeve(ohlcv, transaction_cost=DEFAULT_TRANSACTION_COST, benchmark_symbol="SPY", top_n=3):
+    close = ohlcv["close"].dropna(how="all")
+    if close.empty:
+        return None, {}, pd.DataFrame(), pd.DataFrame()
+
+    alpha_results = {}
+    for alpha in FORMULAIC_ALPHA_DEFINITIONS:
+        alpha_results[alpha["name"]] = run_single_formulaic_alpha(alpha, ohlcv, transaction_cost=transaction_cost, top_n=top_n)
+
+    net_returns_df = pd.DataFrame({name: result["net_returns"] for name, result in alpha_results.items()}).dropna(how="all")
+    gross_returns_df = pd.DataFrame({name: result["gross_returns"] for name, result in alpha_results.items()}).dropna(how="all")
+    trading_costs_df = pd.DataFrame({name: result["trading_costs"] for name, result in alpha_results.items()}).dropna(how="all")
+    if net_returns_df.empty:
+        return None, alpha_results, pd.DataFrame(), pd.DataFrame()
+
+    common_index = net_returns_df.index.intersection(gross_returns_df.index)
+    net_returns_df = net_returns_df.loc[common_index].fillna(0.0)
+    gross_returns_df = gross_returns_df.loc[common_index].fillna(0.0)
+    trading_costs_df = trading_costs_df.reindex(common_index).fillna(0.0)
+
+    sleeve_net_returns = net_returns_df.mean(axis=1)
+    sleeve_gross_returns = gross_returns_df.mean(axis=1)
+    sleeve_trading_costs = trading_costs_df.mean(axis=1)
+
+    aggregate_weights = None
+    for result in alpha_results.values():
+        weights = result["target_weights"].reindex(common_index).fillna(0.0)
+        aggregate_weights = weights if aggregate_weights is None else aggregate_weights.add(weights, fill_value=0.0)
+    aggregate_weights = aggregate_weights / max(1, len(alpha_results))
+    current_holdings = aggregate_weights.iloc[-1][aggregate_weights.iloc[-1] > 0].sort_values(ascending=False)
+    selected_assets = current_holdings.index.tolist() or ["Cash"]
+    latest_signal = make_signal(
+        FORMULAIC_ALPHA_SLEEVE,
+        common_index[-1],
+        ", ".join(selected_assets[:6]),
+        "BUY" if selected_assets != ["Cash"] else "CASH",
+        min(100, len(selected_assets) / max(1, len(close.columns)) * 100),
+        "Equal-weight sleeve combining 10 simplified daily formulaic alpha models. Each alpha trades from T signal to T+1 execution.",
+        1 if selected_assets != ["Cash"] else -1,
+    )
+
+    monthly_holdings = []
+    for date, row in aggregate_weights.resample("ME").last().dropna(how="all").iterrows():
+        monthly_holdings.append(
+            {
+                "Date": date,
+                "Holdings": row[row > 0].index.tolist() or ["Cash"],
+                "Holdings_str": format_holdings(row),
+            }
+        )
+
+    sleeve_result = build_backtest_result(
+        close,
+        sleeve_net_returns,
+        FORMULAIC_ALPHA_SLEEVE,
+        benchmark_symbol=benchmark_symbol,
+        transaction_cost=transaction_cost,
+        rebalances=common_index.tolist(),
+        turnover_list=[result["turnover"].sum() / max(1, len(alpha_results)) for result in alpha_results.values()],
+        trading_costs=sleeve_trading_costs,
+        monthly_holdings=monthly_holdings,
+        latest_scores=build_formulaic_alpha_table(alpha_results, pd.DataFrame()),
+        summary_points=[
+            "Combines 10 simplified WorldQuant 101-inspired daily alpha models.",
+            "Each alpha ranks ETFs cross-sectionally and holds the top-ranked ETFs equally.",
+            "Signals use daily OHLCV data and trades execute with next-day weights to avoid look-ahead bias.",
+        ],
+    )
+    if sleeve_result is not None:
+        sleeve_result["signal"] = latest_signal
+        sleeve_result["alpha_results"] = alpha_results
+        sleeve_result["alpha_returns"] = net_returns_df
+        sleeve_result["alpha_gross_returns"] = gross_returns_df
+        sleeve_result["aggregate_weights"] = aggregate_weights
+
+    correlations = net_returns_df.corr()
+    for name, result in alpha_results.items():
+        other_corr = correlations[name].drop(index=name, errors="ignore")
+        avg_corr = other_corr.mean() if not other_corr.empty else np.nan
+        result["avg_correlation"] = avg_corr
+        result["status"] = classify_formulaic_alpha_status(
+            result["metrics"],
+            result["turnover"].sum(),
+            result["cost_drag"],
+            avg_corr,
+        )
+    return sleeve_result, alpha_results, correlations, net_returns_df
+
+
 def build_strategy_summary(result):
     metrics = result["metrics"]
     holdings = ", ".join(result["current_holdings"]) if result["current_holdings"] else "Cash"
@@ -1325,6 +1618,33 @@ def build_strategy_monitoring_table(results):
     return pd.DataFrame(rows)
 
 
+def build_formulaic_alpha_table(alpha_results, correlations):
+    rows = []
+    for name, result in alpha_results.items():
+        metrics = result["metrics"]
+        gross_metrics = result["gross_metrics"]
+        avg_corr = result.get("avg_correlation", np.nan)
+        rows.append(
+            {
+                "Alpha name": name,
+                "Category": result["category"],
+                "Current signal": result["current_signal"],
+                "Selected ETFs": ", ".join(result["selected_etfs"]),
+                "Current allocation": 1 / max(1, len(alpha_results)),
+                "Gross return": gross_metrics["total_return"],
+                "Net return": metrics["total_return"],
+                "Sharpe ratio": metrics["sharpe"],
+                "Max drawdown": metrics["max_drawdown"],
+                "Current drawdown": metrics["current_drawdown"],
+                "Turnover": result["turnover"].sum(),
+                "Transaction cost drag": result["cost_drag"],
+                "Average correlation": avg_corr,
+                "Status": result.get("status", "N/A"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL):
     net_returns = {}
     gross_returns = {}
@@ -1503,6 +1823,86 @@ def render_strategy_correlation(results):
         st.warning("Correlation warning: several strategies may be moving together. Consider reducing overlapping strategy weights.")
 
 
+def render_formulaic_alpha_lab(sleeve_result, alpha_results, correlations):
+    st.header("Formulaic Alpha Lab")
+    st.write(
+        "Research section for 10 simplified WorldQuant 101-inspired daily ETF alphas. "
+        "The main portfolio sees these models only as one sleeve: Formulaic Alpha Sleeve."
+    )
+    if sleeve_result is None or not alpha_results:
+        st.warning("Formulaic alpha results are unavailable for the selected data.")
+        return
+
+    sleeve_metrics = sleeve_result["metrics"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Sleeve Gross Return", f"{sleeve_metrics['gross_return'] * 100:.2f}%")
+    c2.metric("Sleeve Net Return", f"{sleeve_metrics['net_return'] * 100:.2f}%")
+    c3.metric("Sleeve Sharpe", f"{sleeve_metrics['sharpe']:.2f}")
+    c4.metric("Sleeve Cost Drag", f"{sleeve_metrics['transaction_cost_drag'] * 100:.2f}%")
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Sleeve Max Drawdown", f"{sleeve_metrics['max_drawdown'] * 100:.2f}%")
+    c6.metric("Sleeve Current Drawdown", f"{calculate_current_drawdown(sleeve_result['strategy_equity']) * 100:.2f}%")
+    c7.metric("Sleeve Turnover", f"{sleeve_metrics['total_turnover']:.2f}x")
+
+    alpha_table = build_formulaic_alpha_table(alpha_results, correlations)
+    st.subheader("10 Alpha Monitoring Table")
+    st.dataframe(
+        alpha_table.style.format(
+            {
+                "Current allocation": "{:.2%}",
+                "Gross return": "{:.2%}",
+                "Net return": "{:.2%}",
+                "Sharpe ratio": "{:.2f}",
+                "Max drawdown": "{:.2%}",
+                "Current drawdown": "{:.2%}",
+                "Turnover": "{:.2f}",
+                "Transaction cost drag": "{:.2%}",
+                "Average correlation": "{:.2f}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+    if not correlations.empty:
+        st.subheader("Alpha Correlation Heatmap")
+        st.plotly_chart(
+            px.imshow(correlations, text_auto=".2f", title="Formulaic Alpha Correlation", color_continuous_scale="RdBu_r", zmin=-1, zmax=1),
+            use_container_width=True,
+        )
+
+    contribution_df = pd.DataFrame(
+        [
+            {
+                "Alpha": name,
+                "Sleeve PnL Contribution": result["metrics"]["total_return"] * INITIAL_CAPITAL / max(1, len(alpha_results)),
+            }
+            for name, result in alpha_results.items()
+        ]
+    ).sort_values("Sleeve PnL Contribution", ascending=False)
+    st.subheader("Alpha Contribution to Sleeve PnL")
+    st.plotly_chart(px.bar(contribution_df, x="Alpha", y="Sleeve PnL Contribution"), use_container_width=True)
+
+    cost_drag_df = alpha_table[["Alpha name", "Transaction cost drag", "Turnover"]].sort_values("Transaction cost drag", ascending=False)
+    st.subheader("Alphas Most Hurt by Transaction Costs")
+    st.dataframe(
+        cost_drag_df.style.format({"Transaction cost drag": "{:.2%}", "Turnover": "{:.2f}"}),
+        use_container_width=True,
+    )
+
+    selected_alpha = st.selectbox("Select Formulaic Alpha Detail", list(alpha_results.keys()))
+    selected_result = alpha_results[selected_alpha]
+    gross_equity = (1 + selected_result["gross_returns"].dropna()).cumprod()
+    net_equity = (1 + selected_result["net_returns"].dropna()).cumprod()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=gross_equity.index, y=gross_equity, name="Gross", line=dict(dash="dash")))
+    fig.add_trace(go.Scatter(x=net_equity.index, y=net_equity, name="Net"))
+    fig.update_layout(title=f"{selected_alpha} Gross vs Net Performance", xaxis_title="Date", yaxis_title="Growth of 1.0", template="plotly_white")
+    st.plotly_chart(fig, use_container_width=True)
+
+    latest_weights = selected_result["target_weights"].iloc[-1]
+    st.write(f"**Current selected ETFs:** {format_holdings(latest_weights)}")
+
+
 def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol):
     st.header("Backtesting")
     result = results.get(selected_strategy)
@@ -1623,7 +2023,7 @@ def main():
     all_etf_symbols = get_all_etf_symbols()
     ma_default_index = all_etf_symbols.index("SPY") if "SPY" in all_etf_symbols else 0
     ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
-    selected_strategy = st.sidebar.selectbox("Strategy Detail", STRATEGY_TYPES, index=0)
+    selected_strategy = st.sidebar.selectbox("Strategy Detail", STRATEGY_SLEEVE_TYPES, index=0)
     backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
     benchmark_symbol = st.sidebar.selectbox("Benchmark", all_etf_symbols, index=ma_default_index)
     transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps per buy/sell)", min_value=0, max_value=100, value=5, step=1)
@@ -1640,19 +2040,20 @@ def main():
     required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
     backtest_symbols = tuple(sorted(set(selected_tickers) | required_strategy_symbols))
 
-    with st.spinner("Downloading cached ETF price data..."):
-        backtest_close = load_backtest_data(
+    with st.spinner("Downloading cached daily OHLCV ETF data..."):
+        backtest_ohlcv = load_backtest_ohlcv_data(
             backtest_symbols,
             backtest_start.strftime("%Y-%m-%d"),
             backtest_end.strftime("%Y-%m-%d"),
         )
 
-    if backtest_close.empty:
+    if not backtest_ohlcv or backtest_ohlcv["close"].empty:
         st.error("Unable to load backtest data. Please try again later or select fewer ETFs.")
         return
 
+    backtest_close = backtest_ohlcv["close"].copy()
     st.caption(
-        f"Using one cached adjusted-close download for {len(backtest_close.columns)} ETFs from "
+        f"Using one cached daily OHLCV download for {len(backtest_close.columns)} ETFs from "
         f"{backtest_close.index.min().date()} to {backtest_close.index.max().date()}."
     )
 
@@ -1665,14 +2066,24 @@ def main():
         )
 
     strategy_results = {name: result for name, result in strategy_results.items() if result is not None}
+    with st.spinner("Running Formulaic Alpha Sleeve..."):
+        formulaic_sleeve_result, formulaic_alpha_results, formulaic_alpha_correlations, formulaic_alpha_returns = run_formulaic_alpha_sleeve(
+            backtest_ohlcv,
+            transaction_cost=transaction_cost,
+            benchmark_symbol=benchmark_symbol,
+            top_n=3,
+        )
+    if formulaic_sleeve_result is not None:
+        strategy_results[FORMULAIC_ALPHA_SLEEVE] = formulaic_sleeve_result
+
     if not strategy_results:
         st.error("No strategy backtests could be calculated with the selected data.")
         return
 
     portfolio_returns, portfolio_metrics = build_portfolio_backtest(strategy_results, initial_capital=initial_portfolio_value)
 
-    portfolio_tab, monitoring_tab, correlation_tab, backtesting_tab = st.tabs(
-        ["Portfolio Overview", "Strategy Monitoring", "Strategy Correlation", "Backtesting"]
+    portfolio_tab, monitoring_tab, correlation_tab, backtesting_tab, alpha_lab_tab = st.tabs(
+        ["Portfolio Overview", "Strategy Monitoring", "Strategy Correlation", "Backtesting", "Formulaic Alpha Lab"]
     )
 
     with portfolio_tab:
@@ -1691,6 +2102,9 @@ def main():
 
     with backtesting_tab:
         render_clean_backtesting(strategy_results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol)
+
+    with alpha_lab_tab:
+        render_formulaic_alpha_lab(formulaic_sleeve_result, formulaic_alpha_results, formulaic_alpha_correlations)
 
     st.write("---")
     st.write("Built with Streamlit, yfinance, pandas, numpy, and plotly.")
