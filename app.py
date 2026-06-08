@@ -62,9 +62,29 @@ SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_SLEEVE_TYPES
 DEFENSIVE_ETFS = ["TLT", "IEF", "GLD", "SHY", "XLV", "XLU"]
 RISK_ON_ETFS = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLY", "XLI", "XLC", "EFA", "EEM"]
 INITIAL_CAPITAL = 1_000_000
+PORTFOLIO_START_DATE = pd.Timestamp("2026-06-04")
 BUY_TRANSACTION_COST = 0.0005
 SELL_TRANSACTION_COST = 0.0005
 DEFAULT_TRANSACTION_COST = 0.0005
+
+MARKET_GROUPS = {
+    "Equity": ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLU", "XLI", "XLB", "XLRE", "XLC"],
+    "Rates": ["SHY", "IEF", "TLT", "AGG", "TIP"],
+    "Credit": ["HYG", "LQD"],
+    "Commodities / Inflation": ["GLD", "SLV", "DBC", "USO"],
+    "Geography": ["EFA", "EEM", "FXI", "VGK", "EWJ", "INDA"],
+}
+
+FACTOR_PROXIES = {
+    "Equity / Growth": ["SPY", "QQQ"],
+    "Small Cap": ["IWM"],
+    "Rates / Duration": ["TLT", "IEF"],
+    "Defensive / Cash": ["SHY"],
+    "Credit": ["HYG", "LQD"],
+    "Commodities / Inflation": ["DBC", "GLD"],
+    "International Developed": ["EFA"],
+    "Emerging Markets": ["EEM"],
+}
 
 BACKTEST_PERIODS = {
     "3 Years": 3,
@@ -1580,39 +1600,166 @@ def calculate_current_drawdown(equity):
     return (equity / equity.cummax() - 1).iloc[-1]
 
 
-def classify_strategy_status(result):
+def get_strategy_returns_frame(results, return_key="strategy_returns"):
+    return pd.DataFrame(
+        {strategy_name: result[return_key] for strategy_name, result in results.items() if result is not None}
+    ).dropna(how="all").fillna(0.0)
+
+
+def calculate_var_es(returns, confidence=0.95):
+    returns = returns.dropna()
+    if returns.empty:
+        return np.nan, np.nan
+    var_level = np.percentile(returns, (1 - confidence) * 100)
+    tail = returns[returns <= var_level]
+    expected_shortfall = tail.mean() if not tail.empty else var_level
+    return var_level, expected_shortfall
+
+
+def calculate_strategy_correlations(results):
+    returns_df = get_strategy_returns_frame(results)
+    if returns_df.shape[1] < 2:
+        return pd.DataFrame()
+    return returns_df.corr()
+
+
+def calculate_strategy_risk_contributions(results):
+    returns_df = get_strategy_returns_frame(results)
+    if returns_df.empty:
+        return pd.Series(dtype=float)
+    weights = pd.Series(1 / len(returns_df.columns), index=returns_df.columns)
+    cov = returns_df.cov() * 252
+    portfolio_variance = float(weights.T @ cov @ weights)
+    if portfolio_variance <= 0:
+        return (returns_df.std() * np.sqrt(252) * weights).fillna(0.0)
+    portfolio_volatility = np.sqrt(portfolio_variance)
+    marginal_contribution = cov @ weights
+    component_contribution = weights * marginal_contribution / portfolio_volatility
+    return component_contribution.fillna(0.0)
+
+
+def get_max_strategy_correlation(strategy_name, correlations):
+    if correlations.empty or strategy_name not in correlations.columns:
+        return np.nan
+    corr_row = correlations[strategy_name].drop(index=strategy_name, errors="ignore").abs()
+    return corr_row.max() if not corr_row.empty else np.nan
+
+
+def classify_strategy_status(result, max_correlation=np.nan, risk_contribution=np.nan):
     metrics = result["metrics"]
-    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] <= -0.25:
+    current_drawdown = calculate_current_drawdown(result["strategy_equity"])
+    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] < -0.15:
         return "Pause"
-    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] <= -0.15:
+    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] < -0.10:
+        return "Reduce"
+    if pd.notna(current_drawdown) and current_drawdown < -0.08:
         return "Reduce"
     if pd.notna(metrics["sharpe"]) and metrics["sharpe"] < 0:
         return "Watch"
-    if metrics.get("transaction_cost_drag", 0) > 0.03 or metrics.get("avg_turnover", 0) > 1.5:
+    if metrics.get("transaction_cost_drag", 0) > 0.03 and metrics.get("total_turnover", 0) > 5:
         return "Watch"
+    if pd.notna(max_correlation) and max_correlation > 0.80:
+        return "Watch"
+    if pd.notna(risk_contribution) and risk_contribution > 0.35:
+        return "Reduce"
     return "Healthy"
 
 
-def build_strategy_monitoring_table(results):
+def recommended_action_from_status(status, max_correlation=np.nan, cost_drag=0.0):
+    if status == "Pause":
+        return "Pause"
+    if status == "Reduce":
+        return "Reduce"
+    if pd.notna(max_correlation) and max_correlation > 0.80:
+        return "Rebalance"
+    if status == "Watch":
+        return "Review"
+    if cost_drag > 0.05:
+        return "Review"
+    return "Keep"
+
+
+def build_risk_explanation(result, status, max_correlation=np.nan, risk_contribution=np.nan):
+    metrics = result["metrics"]
+    if status == "Pause":
+        return "Max drawdown breached the pause limit."
+    if status == "Reduce":
+        if pd.notna(risk_contribution) and risk_contribution > 0.35:
+            return "Risk contribution is concentrated relative to other sleeves."
+        return "Drawdown is above the reduce threshold."
+    if status == "Watch":
+        if pd.notna(metrics["sharpe"]) and metrics["sharpe"] < 0:
+            return "Sharpe ratio is negative."
+        if pd.notna(max_correlation) and max_correlation > 0.80:
+            return "Correlation with another strategy is above 0.80."
+        return "Turnover or transaction cost drag is elevated."
+    return "Risk limits are within the basic MVP thresholds."
+
+
+def build_strategy_allocations(results):
+    correlations = calculate_strategy_correlations(results)
+    risk_contributions = calculate_strategy_risk_contributions(results)
+    statuses = {}
+    for strategy_name, result in results.items():
+        statuses[strategy_name] = classify_strategy_status(
+            result,
+            get_max_strategy_correlation(strategy_name, correlations),
+            risk_contributions.get(strategy_name, np.nan),
+        )
+    active = [strategy_name for strategy_name, status in statuses.items() if status != "Pause"]
+    if not active:
+        active = list(results.keys())
+    allocations = pd.Series(0.0, index=results.keys(), dtype=float)
+    for strategy_name in active:
+        allocations[strategy_name] = 1 / len(active)
+    return allocations, statuses
+
+
+def get_current_holdings_text(result):
+    if result.get("monthly_holdings"):
+        return result["monthly_holdings"][-1]["Holdings_str"]
+    if result.get("signal"):
+        return result["signal"].get("Selected Asset", "N/A")
+    return "N/A"
+
+
+def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL):
+    correlations = calculate_strategy_correlations(results)
+    risk_contributions = calculate_strategy_risk_contributions(results)
+    allocations, statuses = build_strategy_allocations(results)
     rows = []
     for strategy_name, result in results.items():
         if result is None:
             continue
         metrics = result["metrics"]
         signal = result.get("signal", {})
+        max_corr = get_max_strategy_correlation(strategy_name, correlations)
+        risk_contribution = risk_contributions.get(strategy_name, np.nan)
+        status = statuses.get(strategy_name, classify_strategy_status(result, max_corr, risk_contribution))
+        action = recommended_action_from_status(status, max_corr, metrics.get("transaction_cost_drag", 0.0))
+        allocation = allocations.get(strategy_name, 0.0)
+        daily_return = result["strategy_returns"].iloc[-1] if not result["strategy_returns"].empty else np.nan
+        cumulative_return = result["strategy_equity"].iloc[-1] - 1 if not result["strategy_equity"].empty else np.nan
         rows.append(
             {
-                "Strategy name": strategy_name,
-                "Latest signal": signal.get("Signal", "N/A"),
-                "Selected ETF / current holding": signal.get("Selected Asset", "N/A"),
-                "Total return": metrics["gross_return"],
-                "Net return": metrics["net_return"],
-                "Sharpe ratio": metrics["sharpe"],
+                "Strategy": strategy_name,
+                "Allocation %": allocation,
+                "Allocation $": allocation * initial_capital,
+                "Current Holdings": get_current_holdings_text(result),
+                "Latest Signal": signal.get("Signal", "N/A"),
+                "Daily PnL": daily_return * allocation * initial_capital if pd.notna(daily_return) else np.nan,
+                "Cumulative PnL": cumulative_return * allocation * initial_capital if pd.notna(cumulative_return) else np.nan,
+                "Gross Return": metrics["gross_return"],
+                "Net Return": metrics["net_return"],
+                "Sharpe": metrics["sharpe"],
                 "Volatility": metrics["volatility"],
-                "Max drawdown": metrics["max_drawdown"],
+                "Max Drawdown": metrics["max_drawdown"],
+                "Current Drawdown": calculate_current_drawdown(result["strategy_equity"]),
                 "Turnover": metrics["total_turnover"],
-                "Transaction cost drag": metrics["transaction_cost_drag"],
-                "Status": classify_strategy_status(result),
+                "Cost Drag": metrics["transaction_cost_drag"],
+                "Risk Status": status,
+                "Recommended Action": action,
+                "Reason": build_risk_explanation(result, status, max_corr, risk_contribution),
             }
         )
     return pd.DataFrame(rows)
@@ -1662,8 +1809,12 @@ def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL):
     if net_df.empty:
         return pd.DataFrame(), {}
 
-    portfolio_net_returns = net_df.mean(axis=1)
-    portfolio_gross_returns = gross_df.mean(axis=1)
+    allocations, statuses = build_strategy_allocations({name: results[name] for name in net_df.columns})
+    weights = allocations.reindex(net_df.columns).fillna(0.0)
+    if weights.sum() <= 0:
+        weights = pd.Series(1 / len(net_df.columns), index=net_df.columns)
+    portfolio_net_returns = net_df.mul(weights, axis=1).sum(axis=1)
+    portfolio_gross_returns = gross_df.mul(weights, axis=1).sum(axis=1)
     portfolio_net_value = initial_capital * (1 + portfolio_net_returns).cumprod()
     portfolio_gross_value = initial_capital * (1 + portfolio_gross_returns).cumprod()
     portfolio_returns = pd.DataFrame(
@@ -1677,23 +1828,43 @@ def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL):
     net_equity = portfolio_net_value / initial_capital
     gross_equity = portfolio_gross_value / initial_capital
     metrics = calculate_performance_metrics(net_equity, portfolio_net_returns, 0)
+    var95, es95 = calculate_var_es(portfolio_net_returns, confidence=0.95)
+    correlations = calculate_strategy_correlations(results)
+    risk_contributions = calculate_strategy_risk_contributions(results)
     metrics["current_drawdown"] = calculate_current_drawdown(net_equity)
     metrics["portfolio_value"] = portfolio_net_value.iloc[-1]
+    metrics["total_pnl"] = portfolio_net_value.iloc[-1] - initial_capital
     metrics["gross_return"] = gross_equity.iloc[-1] - 1
     metrics["net_return"] = net_equity.iloc[-1] - 1
+    metrics["var_95"] = var95
+    metrics["expected_shortfall_95"] = es95
     metrics["transaction_cost_drag"] = gross_equity.iloc[-1] - net_equity.iloc[-1]
     metrics["total_turnover"] = sum(
-        result["metrics"]["total_turnover"] / max(1, len(net_df.columns))
-        for result in results.values()
-        if result is not None
+        results[strategy_name]["metrics"]["total_turnover"] * weights.get(strategy_name, 0.0)
+        for strategy_name in net_df.columns
     )
-    metrics["active_strategies"] = len(net_df.columns)
+    metrics["active_strategies"] = int((weights > 0).sum())
     metrics["warning_strategies"] = sum(
-        classify_strategy_status(result) in ["Watch", "Reduce", "Pause"]
-        for result in results.values()
-        if result is not None
+        statuses.get(strategy_name, "Healthy") in ["Watch", "Reduce", "Pause"]
+        for strategy_name in net_df.columns
     )
+    metrics["allocations"] = weights
+    upper = correlations.where(np.triu(np.ones(correlations.shape), k=1).astype(bool)).stack() if not correlations.empty else pd.Series(dtype=float)
+    metrics["average_pairwise_correlation"] = upper.mean() if not upper.empty else np.nan
+    metrics["recommendation"] = build_portfolio_recommendation(metrics)
     return portfolio_returns, metrics
+
+
+def build_portfolio_recommendation(metrics):
+    if metrics.get("current_drawdown", 0) < -0.10 or metrics.get("max_drawdown", 0) < -0.15:
+        return "Reduce risk: portfolio drawdown is above the MVP risk limit."
+    if metrics.get("var_95", 0) < -0.03 or metrics.get("expected_shortfall_95", 0) < -0.05:
+        return "Hedge or reduce: VaR / Expected Shortfall is elevated."
+    if metrics.get("average_pairwise_correlation", 0) > 0.70:
+        return "Rebalance: strategy correlations are high."
+    if metrics.get("transaction_cost_drag", 0) > 0.05:
+        return "Review costs: turnover and cost drag are high."
+    return "Keep current allocation: portfolio risk is within MVP limits."
 
 
 def render_clean_portfolio_overview(results, portfolio_returns, portfolio_metrics, initial_capital=INITIAL_CAPITAL):
@@ -1701,22 +1872,32 @@ def render_clean_portfolio_overview(results, portfolio_returns, portfolio_metric
     if portfolio_returns.empty:
         st.warning("Portfolio backtest is unavailable for the selected settings.")
         return
+    st.info(
+        "This Portfolio Overview is a hypothetical / simulated multi-strategy portfolio tracker, not a live brokerage account. "
+        "Each strategy is treated as a separate sleeve. Portfolio PnL is calculated from the weighted combination of strategy "
+        "net returns after transaction costs."
+    )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Initial Capital", f"${initial_capital:,.0f}")
     c2.metric("Portfolio Value", f"${portfolio_metrics['portfolio_value']:,.0f}")
-    c3.metric("Total Return", f"{portfolio_metrics['gross_return'] * 100:.2f}%")
+    c3.metric("Total PnL", f"${portfolio_metrics['total_pnl']:,.0f}")
     c4.metric("Net Return After Costs", f"{portfolio_metrics['net_return'] * 100:.2f}%")
     c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Portfolio Sharpe", f"{portfolio_metrics['sharpe']:.2f}")
-    c6.metric("Portfolio Volatility", f"{portfolio_metrics['volatility'] * 100:.2f}%")
-    c7.metric("Max Drawdown", f"{portfolio_metrics['max_drawdown'] * 100:.2f}%")
-    c8.metric("Current Drawdown", f"{portfolio_metrics['current_drawdown'] * 100:.2f}%")
+    c5.metric("Gross Return", f"{portfolio_metrics['gross_return'] * 100:.2f}%")
+    c6.metric("Portfolio Sharpe", f"{portfolio_metrics['sharpe']:.2f}")
+    c7.metric("Portfolio Volatility", f"{portfolio_metrics['volatility'] * 100:.2f}%")
+    c8.metric("Max Drawdown", f"{portfolio_metrics['max_drawdown'] * 100:.2f}%")
     c9, c10, c11, c12 = st.columns(4)
-    c9.metric("Total Turnover", f"{portfolio_metrics['total_turnover']:.2f}x")
-    c10.metric("Cost Drag", f"{portfolio_metrics['transaction_cost_drag'] * 100:.2f}%")
-    c11.metric("Active Strategies", str(portfolio_metrics["active_strategies"]))
-    c12.metric("Strategies With Warnings", str(portfolio_metrics["warning_strategies"]))
+    c9.metric("Current Drawdown", f"{portfolio_metrics['current_drawdown'] * 100:.2f}%")
+    c10.metric("VaR 95%", f"{portfolio_metrics['var_95'] * 100:.2f}%")
+    c11.metric("Expected Shortfall 95%", f"{portfolio_metrics['expected_shortfall_95'] * 100:.2f}%")
+    c12.metric("Cost Drag", f"{portfolio_metrics['transaction_cost_drag'] * 100:.2f}%")
+    c13, c14, c15 = st.columns(3)
+    c13.metric("Total Turnover", f"{portfolio_metrics['total_turnover']:.2f}x")
+    c14.metric("Active Strategies", str(portfolio_metrics["active_strategies"]))
+    c15.metric("Watch / Reduce / Pause", str(portfolio_metrics["warning_strategies"]))
+    st.success(f"Current overall portfolio recommendation: {portfolio_metrics['recommendation']}")
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=portfolio_returns.index, y=portfolio_returns["Net Value"], name="Net Portfolio", line=dict(width=2)))
@@ -1735,41 +1916,55 @@ def render_clean_portfolio_overview(results, portfolio_returns, portfolio_metric
     st.plotly_chart(dd_fig, use_container_width=True)
 
     contribution_rows = []
+    allocation_rows = []
+    risk_contributions = calculate_strategy_risk_contributions(results)
+    allocations = portfolio_metrics.get("allocations", pd.Series(1 / max(1, len(results)), index=results.keys()))
     for strategy_name, result in results.items():
         if result is None:
             continue
+        allocation = allocations.get(strategy_name, 0.0)
+        allocation_rows.append({"Strategy": strategy_name, "Allocation": allocation, "Allocation $": allocation * initial_capital})
         contribution_rows.append(
             {
                 "Strategy": strategy_name,
-                "PnL Contribution": result["metrics"]["net_return"] * initial_capital / max(1, portfolio_metrics["active_strategies"]),
+                "PnL Contribution": result["metrics"]["net_return"] * initial_capital * allocation,
+                "Risk Contribution": risk_contributions.get(strategy_name, np.nan),
             }
         )
+    allocation_df = pd.DataFrame(allocation_rows)
+    st.plotly_chart(px.bar(allocation_df, x="Strategy", y="Allocation $", title="Strategy Allocation"), use_container_width=True)
     contribution_df = pd.DataFrame(contribution_rows).sort_values("PnL Contribution", ascending=False)
     st.plotly_chart(px.bar(contribution_df, x="Strategy", y="PnL Contribution", title="Strategy Contribution to Total PnL"), use_container_width=True)
+    st.plotly_chart(px.bar(contribution_df, x="Strategy", y="Risk Contribution", title="Strategy Contribution to Risk"), use_container_width=True)
 
 
-def render_clean_strategy_monitoring(results):
-    st.header("Strategy Monitoring")
-    table = build_strategy_monitoring_table(results)
+def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL):
+    st.header("Strategies Live Monitoring")
+    table = build_strategy_monitoring_table(results, initial_capital=initial_capital)
     if table.empty:
         st.warning("No strategy results are available.")
         return
     st.dataframe(
         table.style.format(
             {
-                "Total return": "{:.2%}",
-                "Net return": "{:.2%}",
-                "Sharpe ratio": "{:.2f}",
+                "Allocation %": "{:.2%}",
+                "Allocation $": "${:,.0f}",
+                "Daily PnL": "${:,.0f}",
+                "Cumulative PnL": "${:,.0f}",
+                "Gross Return": "{:.2%}",
+                "Net Return": "{:.2%}",
+                "Sharpe": "{:.2f}",
                 "Volatility": "{:.2%}",
-                "Max drawdown": "{:.2%}",
+                "Max Drawdown": "{:.2%}",
+                "Current Drawdown": "{:.2%}",
                 "Turnover": "{:.2f}",
-                "Transaction cost drag": "{:.2%}",
+                "Cost Drag": "{:.2%}",
             }
         ),
         use_container_width=True,
     )
 
-    selected_strategy = st.selectbox("Select Strategy Detail", table["Strategy name"].tolist())
+    selected_strategy = st.selectbox("Select Strategy Detail", table["Strategy"].tolist())
     result = results[selected_strategy]
     render_signal_card(result["signal"])
 
@@ -1789,6 +1984,11 @@ def render_clean_strategy_monitoring(results):
     sharpe_fig.update_layout(xaxis_title="Date", yaxis_title="Rolling Sharpe", template="plotly_white")
     st.plotly_chart(sharpe_fig, use_container_width=True)
 
+    rolling_volatility = result["strategy_returns"].rolling(63).std() * np.sqrt(252)
+    vol_fig = px.line(x=rolling_volatility.index, y=rolling_volatility, title=f"{selected_strategy} Rolling Volatility")
+    vol_fig.update_layout(xaxis_title="Date", yaxis_title="Rolling Volatility", template="plotly_white")
+    st.plotly_chart(vol_fig, use_container_width=True)
+
     st.subheader("Monthly Holdings")
     if result["monthly_holdings"]:
         holdings_df = pd.DataFrame(
@@ -1800,6 +2000,13 @@ def render_clean_strategy_monitoring(results):
 
     st.subheader("Latest Signal Explanation")
     st.write(result["signal"]["Reason"])
+    st.subheader("Transaction Cost Impact")
+    st.write(f"Cost drag: {result['metrics']['transaction_cost_drag'] * 100:.2f}% of growth-of-one performance.")
+    st.plotly_chart(px.area(x=result["trading_costs"].index, y=result["trading_costs"].cumsum(), title="Cumulative Transaction Cost Drag"), use_container_width=True)
+    st.subheader("Risk Limit Explanation")
+    selected_row = table[table["Strategy"] == selected_strategy].iloc[0]
+    st.write(f"Risk status: **{selected_row['Risk Status']}**. Recommended action: **{selected_row['Recommended Action']}**.")
+    st.write(selected_row["Reason"])
 
 
 def render_strategy_correlation(results):
@@ -1821,6 +2028,149 @@ def render_strategy_correlation(results):
     st.metric("Average Pairwise Correlation", f"{avg_corr:.2f}")
     if avg_corr > 0.70 or (upper.abs() > 0.85).any():
         st.warning("Correlation warning: several strategies may be moving together. Consider reducing overlapping strategy weights.")
+
+
+def build_market_monitoring_table(close, symbols):
+    rows = []
+    returns = close.pct_change()
+    for symbol in symbols:
+        if symbol not in close.columns:
+            continue
+        series = close[symbol].dropna()
+        if series.empty:
+            continue
+        latest_price = series.iloc[-1]
+        ma50 = series.rolling(50).mean().iloc[-1] if len(series) >= 50 else np.nan
+        ma200 = series.rolling(200).mean().iloc[-1] if len(series) >= 200 else np.nan
+        vol20 = returns[symbol].rolling(20).std().iloc[-1] * np.sqrt(252) if symbol in returns else np.nan
+        trend_status = "Bullish" if pd.notna(ma50) and pd.notna(ma200) and latest_price > ma50 > ma200 else "Bearish" if pd.notna(ma50) and pd.notna(ma200) and latest_price < ma50 < ma200 else "Neutral"
+        rows.append(
+            {
+                "Ticker": symbol,
+                "Latest Price": latest_price,
+                "1D Return": series.pct_change(1).iloc[-1],
+                "5D Return": series.pct_change(5).iloc[-1] if len(series) > 5 else np.nan,
+                "20D Return": series.pct_change(20).iloc[-1] if len(series) > 20 else np.nan,
+                "60D Return": series.pct_change(60).iloc[-1] if len(series) > 60 else np.nan,
+                "20D Realized Volatility": vol20,
+                "Trend Status": trend_status,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def classify_market_regime(close):
+    if "SPY" not in close.columns:
+        return "Neutral", "SPY data is not available."
+    spy = close["SPY"].dropna()
+    if len(spy) < 200:
+        return "Neutral", "Not enough SPY history for MA50 / MA200 regime check."
+    spy_return = spy.pct_change()
+    ma50 = spy.rolling(50).mean().iloc[-1]
+    ma200 = spy.rolling(200).mean().iloc[-1]
+    vol20 = spy_return.rolling(20).std().iloc[-1] * np.sqrt(252)
+    price = spy.iloc[-1]
+    if vol20 > 0.30:
+        return "High Volatility", "SPY 20D realized volatility is above the high-volatility threshold."
+    if price > ma50 and price > ma200:
+        return "Risk-On", "SPY is above MA50 and MA200, and realized volatility is not elevated."
+    if price < ma50 and price < ma200:
+        return "Risk-Off", "SPY is below both MA50 and MA200."
+    return "Neutral", "SPY trend is mixed."
+
+
+def render_market_monitoring(close):
+    st.header("Market Monitoring")
+    regime, regime_reason = classify_market_regime(close)
+    st.metric("Simple Market Regime", regime)
+    st.write(regime_reason)
+    st.caption("Hourly refresh does not mean intraday trading. Official signals and backtests use daily bars.")
+
+    for group_name, symbols in MARKET_GROUPS.items():
+        st.subheader(group_name)
+        group_table = build_market_monitoring_table(close, symbols)
+        if group_table.empty:
+            st.write("No selected data is available for this group.")
+            continue
+        st.dataframe(
+            group_table.style.format(
+                {
+                    "Latest Price": "${:,.2f}",
+                    "1D Return": "{:.2%}",
+                    "5D Return": "{:.2%}",
+                    "20D Return": "{:.2%}",
+                    "60D Return": "{:.2%}",
+                    "20D Realized Volatility": "{:.2%}",
+                }
+            ),
+            use_container_width=True,
+        )
+
+
+def build_factor_returns(close):
+    factor_returns = {}
+    returns = close.pct_change().dropna()
+    for factor, symbols in FACTOR_PROXIES.items():
+        available = [symbol for symbol in symbols if symbol in returns.columns]
+        if available:
+            factor_returns[factor] = returns[available].mean(axis=1)
+    return pd.DataFrame(factor_returns).dropna(how="all")
+
+
+def estimate_factor_exposures(results, close):
+    strategy_returns = get_strategy_returns_frame(results)
+    factor_returns = build_factor_returns(close)
+    common_index = strategy_returns.index.intersection(factor_returns.index)
+    if len(common_index) < 60 or factor_returns.empty:
+        return pd.DataFrame()
+    strategy_returns = strategy_returns.loc[common_index].fillna(0.0)
+    factor_returns = factor_returns.loc[common_index].fillna(0.0)
+    rows = []
+    x = factor_returns.values
+    x = np.column_stack([np.ones(len(x)), x])
+    for strategy in strategy_returns.columns:
+        y = strategy_returns[strategy].values
+        try:
+            beta = np.linalg.lstsq(x, y, rcond=None)[0][1:]
+        except np.linalg.LinAlgError:
+            beta = np.full(factor_returns.shape[1], np.nan)
+        row = {"Strategy": strategy}
+        row.update({factor: beta[idx] for idx, factor in enumerate(factor_returns.columns)})
+        rows.append(row)
+    return pd.DataFrame(rows).set_index("Strategy")
+
+
+def render_risk_factors(results, close, formulaic_sleeve_result=None, formulaic_alpha_results=None, formulaic_alpha_correlations=None):
+    st.header("Risk Factors")
+    correlations = calculate_strategy_correlations(results)
+    if not correlations.empty:
+        st.subheader("Strategy Correlation Heatmap")
+        st.plotly_chart(px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Heatmap", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
+        upper = correlations.where(np.triu(np.ones(correlations.shape), k=1).astype(bool)).stack()
+        st.metric("Average Pairwise Strategy Correlation", f"{upper.mean():.2f}" if not upper.empty else "N/A")
+        if not upper.empty and (upper.abs() > 0.80).any():
+            st.warning("Factor concentration warning: at least one pair of strategy sleeves has correlation above 0.80.")
+
+    exposures = estimate_factor_exposures(results, close)
+    if exposures.empty:
+        st.warning("Not enough data for factor exposure regression.")
+    else:
+        st.subheader("Strategy-Level Factor Exposure Table")
+        st.dataframe(exposures.style.format("{:.2f}"), use_container_width=True)
+        portfolio_exposure = exposures.mean().sort_values()
+        st.plotly_chart(px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"), use_container_width=True)
+        if portfolio_exposure.abs().max() > 0.80:
+            st.warning("Factor concentration warning: one factor exposure is large relative to the rest.")
+
+    risk_contributions = calculate_strategy_risk_contributions(results).sort_values(ascending=False)
+    if not risk_contributions.empty:
+        st.subheader("Risk Contribution by Strategy")
+        st.plotly_chart(px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Strategy Risk Contribution"), use_container_width=True)
+        st.dataframe(risk_contributions.to_frame("Risk Contribution").style.format("{:.2%}"), use_container_width=True)
+
+    if formulaic_sleeve_result is not None and formulaic_alpha_results:
+        with st.expander("Optional Formulaic Alpha Lab"):
+            render_formulaic_alpha_lab(formulaic_sleeve_result, formulaic_alpha_results, formulaic_alpha_correlations)
 
 
 def render_formulaic_alpha_lab(sleeve_result, alpha_results, correlations):
@@ -1934,6 +2284,119 @@ def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, sele
     fig.update_layout(title="Portfolio Combined Backtest vs Benchmark", xaxis_title="Date", yaxis_title="Value ($)", template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
+    drawdown = portfolio_returns["Net Value"] / portfolio_returns["Net Value"].cummax() - 1
+    st.plotly_chart(px.area(x=drawdown.index, y=drawdown, title="Portfolio Drawdown"), use_container_width=True)
+
+    monthly_returns = portfolio_returns["Net Value"].resample("ME").last().pct_change().dropna().to_frame("Portfolio Monthly Return")
+    if not monthly_returns.empty:
+        st.subheader("Portfolio Monthly Returns")
+        st.dataframe(monthly_returns.style.format("{:.2%}"), use_container_width=True)
+
+    st.subheader("Strategy Returns Table")
+    table = build_strategy_monitoring_table(results)
+    st.dataframe(
+        table[["Strategy", "Gross Return", "Net Return", "Sharpe", "Volatility", "Max Drawdown", "Current Drawdown", "Turnover", "Cost Drag"]]
+        .style.format(
+            {
+                "Gross Return": "{:.2%}",
+                "Net Return": "{:.2%}",
+                "Sharpe": "{:.2f}",
+                "Volatility": "{:.2%}",
+                "Max Drawdown": "{:.2%}",
+                "Current Drawdown": "{:.2%}",
+                "Turnover": "{:.2f}",
+                "Cost Drag": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+    render_stress_period_analysis(results, portfolio_returns, benchmark_symbol)
+    render_walk_forward_placeholder(portfolio_returns)
+
+
+def render_stress_period_analysis(results, portfolio_returns, benchmark_symbol):
+    st.subheader("Stress Period Analysis")
+    periods = {
+        "COVID Crash": ("2020-02-15", "2020-04-30"),
+        "2022 Rate Shock": ("2022-01-01", "2022-12-31"),
+    }
+    rows = []
+    strategy_returns = get_strategy_returns_frame(results)
+    benchmark = None
+    for result in results.values():
+        if result is not None and result["benchmark_symbol"] == benchmark_symbol:
+            benchmark = result["benchmark_returns"]
+            break
+    for label, (start, end) in periods.items():
+        start_ts = pd.Timestamp(start)
+        end_ts = pd.Timestamp(end)
+        mask = (portfolio_returns.index >= start_ts) & (portfolio_returns.index <= end_ts)
+        if not mask.any():
+            rows.append({"Period": label, "Status": "not enough data"})
+            continue
+        period_returns = portfolio_returns.loc[mask, "Net Return"]
+        strategy_period = strategy_returns.loc[(strategy_returns.index >= start_ts) & (strategy_returns.index <= end_ts)]
+        strategy_total = (1 + strategy_period).prod() - 1 if not strategy_period.empty else pd.Series(dtype=float)
+        portfolio_return = (1 + period_returns).prod() - 1
+        benchmark_period = benchmark.loc[(benchmark.index >= start_ts) & (benchmark.index <= end_ts)].dropna() if benchmark is not None else pd.Series(dtype=float)
+        benchmark_return = (1 + benchmark_period).prod() - 1 if not benchmark_period.empty else np.nan
+        equity = (1 + period_returns).cumprod()
+        drawdown = (equity / equity.cummax() - 1).min()
+        rows.append(
+            {
+                "Period": label,
+                "Status": "ok",
+                "Portfolio Return": portfolio_return,
+                f"{benchmark_symbol} Return": benchmark_return,
+                "Best Strategy": strategy_total.idxmax() if not strategy_total.empty else "N/A",
+                "Worst Strategy": strategy_total.idxmin() if not strategy_total.empty else "N/A",
+                "Drawdown": drawdown,
+            }
+        )
+    stress_df = pd.DataFrame(rows)
+    st.dataframe(stress_df.style.format({"Portfolio Return": "{:.2%}", f"{benchmark_symbol} Return": "{:.2%}", "Drawdown": "{:.2%}"}), use_container_width=True)
+
+
+def render_walk_forward_placeholder(portfolio_returns):
+    st.subheader("Walk-Forward Testing")
+    st.write("Full walk-forward optimization will be added later. This MVP keeps strategy rules fixed and reports a simple train/test split summary.")
+    if portfolio_returns.empty:
+        return
+    split = int(len(portfolio_returns) * 0.70)
+    train = portfolio_returns.iloc[:split]["Net Return"]
+    test = portfolio_returns.iloc[split:]["Net Return"]
+    summary = pd.DataFrame(
+        [
+            {"Sample": "In-Sample First 70%", "Start": train.index.min(), "End": train.index.max(), "Return": (1 + train).prod() - 1, "Sharpe": train.mean() * 252 / (train.std() * np.sqrt(252)) if train.std() > 0 else np.nan},
+            {"Sample": "Out-of-Sample Last 30%", "Start": test.index.min(), "End": test.index.max(), "Return": (1 + test).prod() - 1, "Sharpe": test.mean() * 252 / (test.std() * np.sqrt(252)) if test.std() > 0 else np.nan},
+        ]
+    )
+    st.dataframe(summary.style.format({"Return": "{:.2%}", "Sharpe": "{:.2f}"}), use_container_width=True)
+
+
+def render_strategy_workflow(results):
+    st.header("Strategy Workflow")
+    table = build_strategy_monitoring_table(results)
+    rows = []
+    for _, row in table.iterrows():
+        rows.append(
+            {
+                "Strategy": row["Strategy"],
+                "Idea": "Done",
+                "Hypothesis": "Drafted",
+                "Data": "Available",
+                "Signal": "Implemented",
+                "Backtest": "Completed",
+                "Transaction Cost Included": "Yes",
+                "Risk Limits": "Basic",
+                "Live Monitoring": "Simulated",
+                "Allocation Decision": f"Equal Weight / {row['Recommended Action']}",
+                "Notes": row["Reason"],
+            }
+        )
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
 
 def compute_performance(close):
     performance = {}
@@ -2001,9 +2464,9 @@ def ai_style_summary(performance, volatility, signal, window):
 
 
 def main():
-    st.title("Multi-Strategy ETF Portfolio Dashboard")
+    st.title("Multi-Strategy Portfolio Risk Management Dashboard")
     st.write(
-        "A clean MVP dashboard for monitoring 10 rule-based ETF strategies as one hypothetical portfolio. "
+        "A first-version risk manager dashboard for monitoring ETF strategy sleeves as one hypothetical portfolio. "
         "Transaction costs use 5 bps for buys and 5 bps for sells."
     )
 
@@ -2038,7 +2501,7 @@ def main():
     backtest_end = pd.Timestamp.today().normalize()
     backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
     required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
-    backtest_symbols = tuple(sorted(set(selected_tickers) | required_strategy_symbols))
+    backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | set(selected_tickers) | required_strategy_symbols))
 
     with st.spinner("Downloading cached daily OHLCV ETF data..."):
         backtest_ohlcv = load_backtest_ohlcv_data(
@@ -2052,10 +2515,13 @@ def main():
         return
 
     backtest_close = backtest_ohlcv["close"].copy()
+    refresh_time = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d %H:%M:%S %Z")
     st.caption(
         f"Using one cached daily OHLCV download for {len(backtest_close.columns)} ETFs from "
-        f"{backtest_close.index.min().date()} to {backtest_close.index.max().date()}."
+        f"{backtest_close.index.min().date()} to {backtest_close.index.max().date()}. "
+        f"Last refresh: {refresh_time}. Latest available data date: {backtest_close.index.max().date()}."
     )
+    st.caption("Hourly refresh does not mean intraday trading. Official signals and backtests use daily bars.")
 
     with st.spinner("Running 10 ETF strategy backtests..."):
         strategy_results = run_all_strategy_backtests(
@@ -2082,8 +2548,15 @@ def main():
 
     portfolio_returns, portfolio_metrics = build_portfolio_backtest(strategy_results, initial_capital=initial_portfolio_value)
 
-    portfolio_tab, monitoring_tab, correlation_tab, backtesting_tab, alpha_lab_tab = st.tabs(
-        ["Portfolio Overview", "Strategy Monitoring", "Strategy Correlation", "Backtesting", "Formulaic Alpha Lab"]
+    portfolio_tab, monitoring_tab, market_tab, risk_tab, backtesting_tab, workflow_tab = st.tabs(
+        [
+            "Portfolio Overview",
+            "Strategies Live Monitoring",
+            "Market Monitoring",
+            "Risk Factors",
+            "Backtesting",
+            "Strategy Workflow",
+        ]
     )
 
     with portfolio_tab:
@@ -2095,16 +2568,25 @@ def main():
         )
 
     with monitoring_tab:
-        render_clean_strategy_monitoring(strategy_results)
+        render_clean_strategy_monitoring(strategy_results, initial_capital=initial_portfolio_value)
 
-    with correlation_tab:
-        render_strategy_correlation(strategy_results)
+    with market_tab:
+        render_market_monitoring(backtest_close)
+
+    with risk_tab:
+        render_risk_factors(
+            strategy_results,
+            backtest_close,
+            formulaic_sleeve_result=formulaic_sleeve_result,
+            formulaic_alpha_results=formulaic_alpha_results,
+            formulaic_alpha_correlations=formulaic_alpha_correlations,
+        )
 
     with backtesting_tab:
         render_clean_backtesting(strategy_results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol)
 
-    with alpha_lab_tab:
-        render_formulaic_alpha_lab(formulaic_sleeve_result, formulaic_alpha_results, formulaic_alpha_correlations)
+    with workflow_tab:
+        render_strategy_workflow(strategy_results)
 
     st.write("---")
     st.write("Built with Streamlit, yfinance, pandas, numpy, and plotly.")
