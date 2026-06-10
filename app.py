@@ -9,9 +9,19 @@ st.set_page_config(page_title="ETF Dashboard", page_icon="📈", layout="wide")
 
 ETF_UNIVERSE = {
     "Broad Market": ["SPY", "QQQ", "IWM", "DIA"],
-    "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLU", "XLI", "XLB", "XLRE", "XLC"],
-    "Asset Classes": ["TLT", "SHY", "AGG", "TIP", "HYG", "LQD", "GLD", "SLV", "DBC", "USO", "VNQ"],
-    "Geography": ["EFA", "EEM", "FXI", "VGK", "EWJ", "INDA"],
+    "Sectors": ["XLK", "XLF", "XLE", "XLV", "XLP", "XLY", "XLI", "XLU"],
+    "Asset Classes": ["TLT", "IEF", "SHY", "BIL", "AGG", "TIP", "HYG", "LQD", "GLD", "SLV", "DBC", "USO"],
+    "Geography": ["EFA", "EEM"],
+    "Factor ETFs": ["USMV", "SPLV"],
+}
+
+STOCK_UNIVERSE = {
+    "Technology / Growth": ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "AVGO", "AMD"],
+    "Financials": ["JPM", "BAC", "GS", "MS", "V", "MA", "BLK"],
+    "Energy / Inflation": ["XOM", "CVX", "COP", "SLB"],
+    "Defensive": ["JNJ", "PG", "KO", "PEP", "WMT", "COST", "MCD"],
+    "Industrials": ["CAT", "GE", "HON", "BA", "LMT"],
+    "Consumer / Communication": ["NFLX", "DIS", "TSLA", "HD", "NKE"],
 }
 
 PERIOD_LABELS = {
@@ -94,6 +104,114 @@ BACKTEST_PERIODS = {
 
 REBALANCE_FREQUENCIES = ["Daily", "Weekly", "Monthly"]
 SIGNAL_AGGREGATION_WINDOWS = [5, 10, 20, 30]
+PORTFOLIO_MODES = ["ETF-only", "Stock-only", "ETF + Stock"]
+
+REGIME_NAMES = [
+    "Risk-On Bull Market",
+    "Risk-Off Bear Market",
+    "High Volatility / Crisis",
+    "Inflation / Commodity-Led Market",
+    "Falling Rates / Bond Rally",
+    "Sideways / Choppy Market",
+    "Growth-Led Market",
+    "Value / Financials-Led Market",
+]
+
+SCORE_LABELS = {"high": 1.0, "medium": 0.6, "low": 0.25, "not suitable": 0.0}
+
+STRATEGY_REGIME_SUITABILITY = {
+    "Momentum Rotation": {
+        "Risk-On Bull Market": "high",
+        "Growth-Led Market": "high",
+        "Value / Financials-Led Market": "medium",
+        "Sideways / Choppy Market": "medium",
+        "Risk-Off Bear Market": "low",
+        "High Volatility / Crisis": "low",
+    },
+    "Moving Average Trend Following": {
+        "Risk-On Bull Market": "medium",
+        "Risk-Off Bear Market": "high",
+        "High Volatility / Crisis": "high",
+        "Sideways / Choppy Market": "low",
+        "Falling Rates / Bond Rally": "medium",
+    },
+    "Dual Momentum": {
+        "Risk-On Bull Market": "high",
+        "Growth-Led Market": "high",
+        "Risk-Off Bear Market": "medium",
+        "Falling Rates / Bond Rally": "medium",
+        "Sideways / Choppy Market": "medium",
+    },
+    "Low Volatility Rotation": {
+        "Risk-Off Bear Market": "high",
+        "High Volatility / Crisis": "high",
+        "Sideways / Choppy Market": "medium",
+        "Risk-On Bull Market": "medium",
+    },
+    "Defensive Rotation Strategy": {
+        "Risk-Off Bear Market": "high",
+        "High Volatility / Crisis": "high",
+        "Falling Rates / Bond Rally": "medium",
+        "Risk-On Bull Market": "low",
+    },
+    "Risk-On / Risk-Off Regime Strategy": {
+        "Risk-Off Bear Market": "high",
+        "High Volatility / Crisis": "high",
+        "Risk-On Bull Market": "high",
+        "Sideways / Choppy Market": "medium",
+    },
+    "Breakout Strategy": {
+        "Risk-On Bull Market": "high",
+        "Growth-Led Market": "high",
+        "High Volatility / Crisis": "medium",
+        "Sideways / Choppy Market": "low",
+    },
+    "Mean Reversion Strategy": {
+        "Sideways / Choppy Market": "high",
+        "Risk-On Bull Market": "medium",
+        "High Volatility / Crisis": "low",
+        "Risk-Off Bear Market": "low",
+    },
+    "Volatility Target Strategy": {
+        "High Volatility / Crisis": "high",
+        "Risk-Off Bear Market": "high",
+        "Sideways / Choppy Market": "medium",
+        "Risk-On Bull Market": "medium",
+    },
+    "Equal Weight Multi-ETF Strategy": {
+        "Risk-On Bull Market": "medium",
+        "Growth-Led Market": "medium",
+        "Sideways / Choppy Market": "medium",
+        "Risk-Off Bear Market": "low",
+    },
+    FORMULAIC_ALPHA_SLEEVE: {
+        "Sideways / Choppy Market": "medium",
+        "Growth-Led Market": "medium",
+        "Risk-On Bull Market": "medium",
+        "Value / Financials-Led Market": "medium",
+        "High Volatility / Crisis": "low",
+    },
+}
+
+REGIME_STOCK_PREFERENCES = {
+    "Growth-Led Market": ["Technology / Growth", "Consumer / Communication"],
+    "Risk-On Bull Market": ["Technology / Growth", "Industrials", "Consumer / Communication", "Financials"],
+    "Risk-Off Bear Market": ["Defensive"],
+    "High Volatility / Crisis": ["Defensive"],
+    "Inflation / Commodity-Led Market": ["Energy / Inflation"],
+    "Falling Rates / Bond Rally": ["Technology / Growth", "Defensive"],
+    "Value / Financials-Led Market": ["Financials", "Industrials"],
+    "Sideways / Choppy Market": ["Defensive", "Consumer / Communication"],
+}
+
+RISK_LIMITS = {
+    "max_position_weight": 0.10,
+    "max_strategy_weight": 0.25,
+    "max_sector_exposure": 0.35,
+    "max_drawdown_warning": -0.10,
+    "severe_drawdown_warning": -0.20,
+    "risk_off_cash_minimum": 0.15,
+}
 
 
 def get_all_etf_symbols():
@@ -103,12 +221,31 @@ def get_all_etf_symbols():
     return list(dict.fromkeys(symbols))
 
 
+def get_all_stock_symbols():
+    symbols = []
+    for tickers in STOCK_UNIVERSE.values():
+        symbols.extend(tickers)
+    return list(dict.fromkeys(symbols))
+
+
+def get_stock_category_map():
+    return {ticker: category for category, tickers in STOCK_UNIVERSE.items() for ticker in tickers}
+
+
+def clean_price_data(close, max_missing_ratio=0.15):
+    if close.empty:
+        return close
+    missing_ratio = close.isna().mean()
+    keep_columns = missing_ratio[missing_ratio <= max_missing_ratio].index.tolist()
+    close = close[keep_columns].ffill(limit=5).dropna(how="all")
+    return close
+
+
 def extract_close_prices(df, symbols):
     close = df["Close"].copy()
     if isinstance(close, pd.Series):
         close = close.to_frame(name=symbols[0])
-    close = close.dropna(how="all")
-    return close
+    return clean_price_data(close.dropna(how="all"))
 
 
 def extract_price_field(df, field, symbols):
@@ -131,22 +268,22 @@ def load_data(symbols, period):
 
 
 def compute_returns(close):
-    return close.pct_change().dropna()
+    return close.pct_change(fill_method=None).dropna()
 
 
 def calculate_indicators(close):
     return {
-        "returns_1m": close.pct_change(21),
-        "returns_3m": close.pct_change(63),
-        "returns_6m": close.pct_change(126),
-        "returns_12m": close.pct_change(252),
+        "returns_1m": close.pct_change(21, fill_method=None),
+        "returns_3m": close.pct_change(63, fill_method=None),
+        "returns_6m": close.pct_change(126, fill_method=None),
+        "returns_12m": close.pct_change(252, fill_method=None),
         "ma50": close.rolling(50).mean(),
         "ma200": close.rolling(200).mean(),
         "rolling_high_55": close.rolling(55).max().shift(1),
         "rolling_low_20": close.rolling(20).min().shift(1),
         "rsi14": calculate_rsi(close),
-        "vol20": close.pct_change().rolling(20).std() * np.sqrt(252),
-        "vol60": close.pct_change().rolling(60).std() * np.sqrt(252),
+        "vol20": close.pct_change(fill_method=None).rolling(20).std() * np.sqrt(252),
+        "vol60": close.pct_change(fill_method=None).rolling(60).std() * np.sqrt(252),
     }
 
 
@@ -169,7 +306,7 @@ def calculate_momentum_scores(indicators):
 
 
 def calculate_volatility(close, window=20):
-    return close.pct_change().rolling(window).std() * np.sqrt(252)
+    return close.pct_change(fill_method=None).rolling(window).std() * np.sqrt(252)
 
 
 def available_symbols(close, symbols):
@@ -228,12 +365,41 @@ def load_backtest_ohlcv_data(symbols, start_date, end_date):
     if df.empty:
         return {}
     return {
-        "open": extract_price_field(df, "Open", symbols),
-        "high": extract_price_field(df, "High", symbols),
-        "low": extract_price_field(df, "Low", symbols),
-        "close": extract_price_field(df, "Close", symbols),
-        "volume": extract_price_field(df, "Volume", symbols),
+        "open": clean_price_data(extract_price_field(df, "Open", symbols)),
+        "high": clean_price_data(extract_price_field(df, "High", symbols)),
+        "low": clean_price_data(extract_price_field(df, "Low", symbols)),
+        "close": clean_price_data(extract_price_field(df, "Close", symbols)),
+        "volume": clean_price_data(extract_price_field(df, "Volume", symbols)),
     }
+
+
+@st.cache_data(ttl=3600)
+def load_close_data(symbols, start_date, end_date):
+    symbols = tuple(sorted(set(symbols)))
+    if not symbols:
+        return pd.DataFrame()
+    df = yf.download(
+        symbols,
+        start=start_date,
+        end=end_date,
+        interval="1d",
+        auto_adjust=True,
+        threads=True,
+        progress=False,
+    )
+    if df.empty:
+        return pd.DataFrame()
+    return extract_close_prices(df, symbols)
+
+
+def align_market_data(etf_close, stock_close, benchmark_symbol="SPY"):
+    common_index = etf_close.index
+    if not stock_close.empty:
+        common_index = common_index.intersection(stock_close.index)
+    etf_close = etf_close.reindex(common_index).ffill()
+    stock_close = stock_close.reindex(common_index).ffill() if not stock_close.empty else stock_close
+    benchmark = etf_close[[benchmark_symbol]].dropna() if benchmark_symbol in etf_close.columns else pd.DataFrame()
+    return etf_close, stock_close, benchmark
 
 
 
@@ -287,7 +453,7 @@ def build_backtest_result(
     trading_costs = trading_costs.reindex(strategy_returns.index).fillna(0.0)
     gross_returns = strategy_returns + trading_costs
 
-    daily_returns = close.pct_change().dropna()
+    daily_returns = close.pct_change(fill_method=None).dropna()
     benchmark_returns = daily_returns[benchmark_symbol].reindex(strategy_returns.index).dropna()
     common_index = strategy_returns.index.intersection(benchmark_returns.index)
     if common_index.empty:
@@ -301,14 +467,14 @@ def build_backtest_result(
     gross_equity = (1 + gross_returns).cumprod()
     benchmark_equity = (1 + benchmark_returns).cumprod()
 
-    monthly_strategy = strategy_equity.resample("ME").last().pct_change().dropna()
-    monthly_benchmark = benchmark_equity.resample("ME").last().pct_change().dropna()
+    monthly_strategy = strategy_equity.resample("ME").last().pct_change(fill_method=None).dropna()
+    monthly_benchmark = benchmark_equity.resample("ME").last().pct_change(fill_method=None).dropna()
     monthly_returns_df = pd.DataFrame(
         {strategy_name: monthly_strategy, f"{benchmark_symbol} Buy & Hold": monthly_benchmark}
     ).dropna() * 100
 
-    yearly_strategy = strategy_equity.resample("YE").last().pct_change().dropna()
-    yearly_benchmark = benchmark_equity.resample("YE").last().pct_change().dropna()
+    yearly_strategy = strategy_equity.resample("YE").last().pct_change(fill_method=None).dropna()
+    yearly_benchmark = benchmark_equity.resample("YE").last().pct_change(fill_method=None).dropna()
     yearly_returns_df = pd.DataFrame(
         {strategy_name: yearly_strategy, f"{benchmark_symbol} Buy & Hold": yearly_benchmark}
     ).dropna() * 100
@@ -661,8 +827,8 @@ def combine_strategy_signals(signals):
 
 def run_momentum_backtest(close, top_n=3, lookback_months=3, transaction_cost=0.0005, benchmark_symbol="SPY"):
     monthly_prices = close.resample("ME").last()
-    trailing_returns = monthly_prices.pct_change(lookback_months)
-    daily_returns = close.pct_change().dropna()
+    trailing_returns = monthly_prices.pct_change(lookback_months, fill_method=None)
+    daily_returns = close.pct_change(fill_method=None).dropna()
     strategy_returns = pd.Series(index=daily_returns.index, dtype=float)
     trading_costs = pd.Series(0.0, index=daily_returns.index)
     previous_weights = pd.Series(0.0, index=close.columns)
@@ -748,7 +914,7 @@ def run_moving_average_trend_backtest(close, symbol="SPY", ma_window=200, benchm
         return None
 
     symbol_close = close[[symbol]].dropna()
-    daily_returns = symbol_close.pct_change().dropna()
+    daily_returns = symbol_close.pct_change(fill_method=None).dropna()
     ma200 = symbol_close[symbol].rolling(ma_window).mean()
     signal = (symbol_close[symbol] > ma200).astype(float)
     strategy_exposure = signal.shift(1).reindex(daily_returns.index).fillna(0.0)
@@ -813,8 +979,8 @@ def run_dual_momentum_backtest(close, top_n=3, lookback_months=3, transaction_co
         return None
 
     monthly_prices = close.resample("ME").last()
-    trailing_returns = monthly_prices.pct_change(lookback_months)
-    daily_returns = close.pct_change().dropna()
+    trailing_returns = monthly_prices.pct_change(lookback_months, fill_method=None)
+    daily_returns = close.pct_change(fill_method=None).dropna()
     strategy_returns = pd.Series(index=daily_returns.index, dtype=float)
     trading_costs = pd.Series(0.0, index=daily_returns.index)
     previous_weights = pd.Series(0.0, index=close.columns)
@@ -898,7 +1064,7 @@ def run_dual_momentum_backtest(close, top_n=3, lookback_months=3, transaction_co
 
 def run_low_volatility_backtest(close, top_n=3, lookback_days=66, transaction_cost=0.0005, benchmark_symbol="SPY"):
     monthly_prices = close.resample("ME").last()
-    daily_returns = close.pct_change().dropna()
+    daily_returns = close.pct_change(fill_method=None).dropna()
     trailing_volatility = daily_returns.rolling(lookback_days).std() * np.sqrt(252)
     strategy_returns = pd.Series(index=daily_returns.index, dtype=float)
     trading_costs = pd.Series(0.0, index=daily_returns.index)
@@ -990,7 +1156,7 @@ def weights_from_signal(signal, close_columns):
 
 def run_rule_based_monthly_backtest(strategy_type, close, transaction_cost=0.0005, ma_symbol="SPY", benchmark_symbol="SPY"):
     monthly_prices = close.resample("ME").last()
-    daily_returns = close.pct_change().dropna()
+    daily_returns = close.pct_change(fill_method=None).dropna()
     strategy_returns = pd.Series(index=daily_returns.index, dtype=float)
     trading_costs = pd.Series(0.0, index=daily_returns.index)
     previous_weights = pd.Series(0.0, index=close.columns)
@@ -1125,7 +1291,7 @@ def calculate_formulaic_alpha_scores(alpha_name, ohlcv):
     low = ohlcv["low"]
     close = ohlcv["close"]
     volume = ohlcv["volume"]
-    returns = close.pct_change()
+    returns = close.pct_change(fill_method=None)
     typical_price = (high + low + close) / 3
     adv20 = volume.rolling(20).mean()
     vol20 = returns.rolling(20).std()
@@ -1136,11 +1302,11 @@ def calculate_formulaic_alpha_scores(alpha_name, ohlcv):
         gap = open_price / close.shift(1) - 1
         return -1 * gap
     if alpha_name == "Short-Term Return Reversal Alpha":
-        recent_return = close.pct_change(5)
+        recent_return = close.pct_change(5, fill_method=None)
         return -1 * recent_return
     if alpha_name == "Volume Spike Reversal Alpha":
         volume_ratio = volume / adv20
-        price_move = close.pct_change(1)
+        price_move = close.pct_change(1, fill_method=None)
         return -1 * price_move * cross_sectional_rank(volume_ratio)
     if alpha_name == "Typical Price Reversion Alpha":
         distance = close / typical_price - 1
@@ -1150,22 +1316,22 @@ def calculate_formulaic_alpha_scores(alpha_name, ohlcv):
         rolling_low = low.rolling(20).min().shift(1)
         return close / rolling_high - close / rolling_low
     if alpha_name == "Price-Volume Confirmation Alpha":
-        momentum = close.pct_change(5)
-        volume_change = volume.pct_change(5)
+        momentum = close.pct_change(5, fill_method=None)
+        volume_change = volume.pct_change(5, fill_method=None)
         return momentum * cross_sectional_rank(volume_change)
     if alpha_name == "Price-Volume Correlation Alpha":
-        price_ret = close.pct_change()
-        volume_ret = volume.pct_change()
+        price_ret = close.pct_change(fill_method=None)
+        volume_ret = volume.pct_change(fill_method=None)
         corr = rolling_pairwise_corr(price_ret, volume_ret, 10)
-        return corr * close.pct_change(5)
+        return corr * close.pct_change(5, fill_method=None)
     if alpha_name == "Low Volatility Reversal Alpha":
-        recent_return = close.pct_change(5)
+        recent_return = close.pct_change(5, fill_method=None)
         return -1 * recent_return / vol20.replace(0, np.nan)
     if alpha_name == "Rank-Based Multi-Factor Alpha":
-        reversal_rank = cross_sectional_rank(-1 * close.pct_change(5))
+        reversal_rank = cross_sectional_rank(-1 * close.pct_change(5, fill_method=None))
         volume_rank = cross_sectional_rank(volume / adv20)
         volatility_rank = cross_sectional_rank(-1 * vol20)
-        trend_rank = cross_sectional_rank(close.pct_change(20))
+        trend_rank = cross_sectional_rank(close.pct_change(20, fill_method=None))
         return 0.35 * reversal_rank + 0.25 * trend_rank + 0.20 * volume_rank + 0.20 * volatility_rank
     return pd.DataFrame(index=close.index, columns=close.columns)
 
@@ -1223,7 +1389,7 @@ def classify_formulaic_alpha_status(metrics, turnover, cost_drag, avg_correlatio
 
 def run_single_formulaic_alpha(alpha, ohlcv, transaction_cost=DEFAULT_TRANSACTION_COST, top_n=3):
     close = ohlcv["close"]
-    asset_returns = close.pct_change().dropna()
+    asset_returns = close.pct_change(fill_method=None).dropna()
     scores = calculate_formulaic_alpha_scores(alpha["name"], ohlcv).reindex(asset_returns.index)
     target_weights = scores_to_target_weights(scores, close.columns, top_n=top_n).reindex(asset_returns.index).fillna(0.0)
     execution_weights = target_weights.shift(1).fillna(0.0)
@@ -1710,6 +1876,95 @@ def build_strategy_allocations(results):
     return allocations, statuses
 
 
+def normalize_score(value, low=-0.10, high=0.20):
+    if pd.isna(value):
+        return 0.0
+    return float(np.clip((value - low) / (high - low), 0, 1))
+
+
+def get_strategy_regime_fit(strategy_name, regime_name):
+    mapping = STRATEGY_REGIME_SUITABILITY.get(strategy_name, {})
+    label = mapping.get(regime_name, "medium")
+    return SCORE_LABELS.get(label, 0.6)
+
+
+def build_regime_aware_strategy_allocation(results, regime, max_strategy_weight=0.25):
+    rows = []
+    for strategy_name, result in results.items():
+        metrics = result["metrics"]
+        recent_returns = result["strategy_returns"].tail(63)
+        recent_performance = (1 + recent_returns).prod() - 1 if not recent_returns.empty else np.nan
+        recent_score = normalize_score(recent_performance, low=-0.08, high=0.12)
+        sharpe = metrics.get("sharpe", np.nan)
+        risk_adjusted_score = normalize_score(sharpe, low=-1.0, high=2.0)
+        current_drawdown = calculate_current_drawdown(result["strategy_equity"])
+        drawdown_penalty = min(1.0, abs(current_drawdown) / 0.20) if pd.notna(current_drawdown) and current_drawdown < 0 else 0.0
+        risk_status = classify_strategy_status(result)
+        risk_limit_penalty = 0.40 if risk_status == "Pause" else 0.25 if risk_status == "Reduce" else 0.10 if risk_status == "Watch" else 0.0
+        signal = result.get("signal", {}).get("Signal", "HOLD")
+        signal_penalty = 0.10 if signal in ["CASH", "RISK-OFF", "SELL"] else 0.0
+        regime_fit = get_strategy_regime_fit(strategy_name, regime["regime_name"])
+        final_score = (
+            0.40 * regime_fit
+            + 0.30 * recent_score
+            + 0.20 * risk_adjusted_score
+            - 0.10 * drawdown_penalty
+            - risk_limit_penalty
+            - signal_penalty
+        )
+        final_score = max(0.0, final_score)
+        rows.append(
+            {
+                "Strategy": strategy_name,
+                "Base Weight": 1 / max(1, len(results)),
+                "Regime Fit Score": regime_fit,
+                "Recent Performance Score": recent_score,
+                "Risk Adjusted Score": risk_adjusted_score,
+                "Drawdown Penalty": drawdown_penalty,
+                "Risk Limit Penalty": risk_limit_penalty + signal_penalty,
+                "Final Score": final_score,
+                "Risk Status": risk_status,
+                "Reason": f"{strategy_name} receives a {regime_fit:.2f} regime-fit score in {regime['regime_name']}; recent performance and risk penalties adjust the final weight.",
+            }
+        )
+    table = pd.DataFrame(rows)
+    if table.empty or table["Final Score"].sum() <= 0:
+        table["Final Allocation"] = 1 / max(1, len(table))
+        return table
+    raw_weights = table["Final Score"] / table["Final Score"].sum()
+    capped = raw_weights.clip(upper=max_strategy_weight)
+    if capped.sum() > 0:
+        table["Final Allocation"] = capped / capped.sum()
+    else:
+        table["Final Allocation"] = 1 / max(1, len(table))
+    return table
+
+
+def adjust_asset_class_targets(regime_name, etf_weight, stock_weight, cash_weight, enable_cash=True, risk_off_cash_min=0.15):
+    total = etf_weight + stock_weight + cash_weight
+    etf_weight, stock_weight, cash_weight = etf_weight / total, stock_weight / total, cash_weight / total
+    if not enable_cash:
+        cash_weight = 0.0
+    if regime_name in ["Risk-Off Bear Market", "High Volatility / Crisis"]:
+        cash_weight = max(cash_weight, risk_off_cash_min)
+        stock_weight *= 0.65
+        etf_weight = max(0.0, 1 - stock_weight - cash_weight)
+    elif regime_name in ["Growth-Led Market", "Risk-On Bull Market"]:
+        cash_weight = min(cash_weight, 0.05 if enable_cash else 0.0)
+        stock_weight = min(0.45, stock_weight * 1.15)
+        etf_weight = max(0.0, 1 - stock_weight - cash_weight)
+    elif regime_name in ["Inflation / Commodity-Led Market", "Falling Rates / Bond Rally"]:
+        cash_weight = max(cash_weight, 0.05 if enable_cash else 0.0)
+        etf_weight = min(0.75, etf_weight * 1.10)
+        stock_weight = max(0.0, 1 - etf_weight - cash_weight)
+    final_total = etf_weight + stock_weight + cash_weight
+    return {
+        "ETFs": etf_weight / final_total,
+        "Stocks": stock_weight / final_total,
+        "Cash / SHY / BIL": cash_weight / final_total,
+    }
+
+
 def get_current_holdings_text(result):
     if result.get("monthly_holdings"):
         return result["monthly_holdings"][-1]["Holdings_str"]
@@ -1784,6 +2039,135 @@ def build_formulaic_alpha_table(alpha_results, correlations):
                 "Status": result.get("status", "N/A"),
             }
         )
+    return pd.DataFrame(rows)
+
+
+def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
+    if stock_close.empty or benchmark_close.empty:
+        return pd.DataFrame()
+    category_map = get_stock_category_map()
+    if isinstance(benchmark_close, pd.DataFrame):
+        spy = benchmark_close.iloc[:, 0].dropna()
+    else:
+        spy = benchmark_close.dropna()
+    common_index = stock_close.index.intersection(spy.index)
+    stock_close = stock_close.reindex(common_index).ffill()
+    spy = spy.reindex(common_index).ffill()
+    if len(common_index) < 200:
+        return pd.DataFrame()
+
+    returns = stock_close.pct_change(fill_method=None)
+    ret20 = stock_close.pct_change(20, fill_method=None).iloc[-1]
+    ret60 = stock_close.pct_change(60, fill_method=None).iloc[-1]
+    ret120 = stock_close.pct_change(120, fill_method=None).iloc[-1]
+    ma50 = stock_close.rolling(50).mean().iloc[-1]
+    ma200 = stock_close.rolling(200).mean().iloc[-1]
+    dist_ma50 = stock_close.iloc[-1] / ma50 - 1
+    dist_ma200 = stock_close.iloc[-1] / ma200 - 1
+    vol20 = returns.rolling(20).std().iloc[-1] * np.sqrt(252)
+    drawdown = stock_close.tail(120) / stock_close.tail(120).cummax() - 1
+    recent_max_drawdown = drawdown.min()
+    relative_strength = ret60 - spy.pct_change(60, fill_method=None).iloc[-1]
+
+    raw = pd.DataFrame(
+        {
+            "Ticker": stock_close.columns,
+            "Category": [category_map.get(ticker, "Other") for ticker in stock_close.columns],
+            "Current Price": stock_close.iloc[-1].values,
+            "20D Return": ret20.values,
+            "60D Return": ret60.values,
+            "120D Return": ret120.values,
+            "Distance From MA50": dist_ma50.values,
+            "Distance From MA200": dist_ma200.values,
+            "Volatility": vol20.values,
+            "Drawdown": recent_max_drawdown.values,
+            "Relative Strength vs SPY": relative_strength.values,
+        }
+    ).dropna()
+    if raw.empty:
+        return raw
+
+    raw["Trend Status"] = np.where(
+        (raw["Distance From MA50"] > 0) & (raw["Distance From MA200"] > 0),
+        "Uptrend",
+        np.where((raw["Distance From MA50"] < 0) & (raw["Distance From MA200"] < 0), "Downtrend", "Mixed"),
+    )
+    raw["momentum_score"] = raw["60D Return"].rank(pct=True)
+    raw["relative_strength_score"] = raw["Relative Strength vs SPY"].rank(pct=True)
+    raw["trend_score"] = ((raw["Distance From MA50"] > 0).astype(float) + (raw["Distance From MA200"] > 0).astype(float)) / 2
+    raw["volatility_score"] = (-raw["Volatility"]).rank(pct=True)
+    raw["drawdown_score"] = raw["Drawdown"].rank(pct=True)
+    raw["Stock Score"] = (
+        0.30 * raw["momentum_score"]
+        + 0.25 * raw["relative_strength_score"]
+        + 0.20 * raw["trend_score"]
+        + 0.15 * raw["volatility_score"]
+        + 0.10 * raw["drawdown_score"]
+    )
+    preferred = REGIME_STOCK_PREFERENCES.get(regime["regime_name"], [])
+    raw["Regime Preference Boost"] = raw["Category"].isin(preferred).astype(float) * 0.15
+    if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"]:
+        raw["Stock Score"] += np.where(raw["Category"] == "Defensive", 0.20, -0.10)
+        raw["Stock Score"] += raw["volatility_score"] * 0.10
+    elif regime["regime_name"] == "Inflation / Commodity-Led Market":
+        raw["Stock Score"] += np.where(raw["Category"] == "Energy / Inflation", 0.25, 0)
+    elif regime["regime_name"] == "Growth-Led Market":
+        raw["Stock Score"] += np.where(raw["Category"] == "Technology / Growth", 0.20, 0)
+    elif regime["regime_name"] == "Value / Financials-Led Market":
+        raw["Stock Score"] += np.where(raw["Category"] == "Financials", 0.20, 0)
+    raw["Stock Score"] += raw["Regime Preference Boost"]
+    raw["Reason"] = raw.apply(
+        lambda row: f"{row['Ticker']} ranks well for {regime['regime_name']} because of {row['Category']} exposure, relative strength, trend, volatility, and drawdown profile.",
+        axis=1,
+    )
+    return raw.sort_values("Stock Score", ascending=False).head(top_n)
+
+
+def build_position_allocation(strategy_results, strategy_allocation_table, stock_selection, asset_targets, initial_capital, max_position_weight=0.10):
+    position_weights = {}
+    etf_budget = asset_targets.get("ETFs", 0.0)
+    stock_budget = asset_targets.get("Stocks", 0.0)
+    cash_budget = asset_targets.get("Cash / SHY / BIL", 0.0)
+
+    for _, row in strategy_allocation_table.iterrows():
+        strategy = row["Strategy"]
+        if strategy not in strategy_results:
+            continue
+        sleeve_weight = etf_budget * row["Final Allocation"]
+        signal = strategy_results[strategy].get("signal", {})
+        selected = [asset.strip() for asset in str(signal.get("Selected Asset", "")).split(",")]
+        selected = [asset for asset in selected if asset and asset not in ["Cash", "N/A"]]
+        if not selected:
+            selected = ["SHY"]
+        for asset in selected:
+            position_weights[asset] = position_weights.get(asset, 0.0) + sleeve_weight / len(selected)
+
+    if not stock_selection.empty and stock_budget > 0:
+        stock_weight = stock_budget / len(stock_selection)
+        for ticker in stock_selection["Ticker"]:
+            position_weights[ticker] = position_weights.get(ticker, 0.0) + stock_weight
+
+    if cash_budget > 0:
+        cash_asset = "BIL" if "BIL" in get_all_etf_symbols() else "SHY"
+        position_weights[cash_asset] = position_weights.get(cash_asset, 0.0) + cash_budget
+
+    capped = {}
+    overflow = 0.0
+    for asset, weight in position_weights.items():
+        if weight > max_position_weight:
+            capped[asset] = max_position_weight
+            overflow += weight - max_position_weight
+        else:
+            capped[asset] = weight
+    if overflow > 0:
+        capped["Cash"] = capped.get("Cash", 0.0) + overflow
+    total = sum(capped.values())
+    if total > 0:
+        capped = {asset: weight / total for asset, weight in capped.items()}
+    rows = [
+        {"Position": asset, "Weight": weight, "Dollar Allocation": weight * initial_capital}
+        for asset, weight in sorted(capped.items(), key=lambda item: item[1], reverse=True)
+    ]
     return pd.DataFrame(rows)
 
 
@@ -1933,6 +2317,192 @@ def render_clean_portfolio_overview(results, portfolio_returns, portfolio_metric
     st.plotly_chart(px.bar(contribution_df, x="Strategy", y="Risk Contribution", title="Strategy Contribution to Risk"), use_container_width=True)
 
 
+def render_regime_aware_portfolio_overview(
+    results,
+    portfolio_returns,
+    portfolio_metrics,
+    regime,
+    strategy_allocation,
+    asset_targets,
+    position_allocation,
+    initial_capital=INITIAL_CAPITAL,
+):
+    st.header("Portfolio Overview")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Initial Capital", f"${initial_capital:,.0f}")
+    c2.metric("Portfolio Value", f"${portfolio_metrics.get('portfolio_value', initial_capital):,.0f}")
+    c3.metric("Current Regime", regime["regime_name"])
+    c4.metric("Regime Confidence", f"{regime['confidence']:.0%}")
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Portfolio Sharpe", f"{portfolio_metrics.get('sharpe', np.nan):.2f}")
+    c6.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
+    c7.metric("Cash Allocation", f"{asset_targets.get('Cash / SHY / BIL', 0) * 100:.1f}%")
+    c8.metric("Risk Status", build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets)["Status"])
+    st.info(regime["regime_explanation"])
+    st.success(f"Portfolio recommendation: {portfolio_metrics.get('recommendation', 'Keep current allocation')}")
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("Asset-Class Allocation")
+        asset_df = pd.DataFrame(
+            [{"Sleeve": key, "Weight": value, "Dollar Allocation": value * initial_capital} for key, value in asset_targets.items()]
+        )
+        st.dataframe(asset_df.style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
+        st.plotly_chart(px.pie(asset_df, names="Sleeve", values="Weight", title="Aggregate Portfolio Allocation"), use_container_width=True)
+    with right:
+        st.subheader("Current Top Holdings")
+        st.dataframe(position_allocation.head(12).style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
+
+    st.subheader("Strategy Allocation")
+    st.dataframe(
+        strategy_allocation[["Strategy", "Final Allocation", "Final Score", "Regime Fit Score", "Reason"]]
+        .style.format({"Final Allocation": "{:.2%}", "Final Score": "{:.2f}", "Regime Fit Score": "{:.2f}"}),
+        use_container_width=True,
+    )
+
+    if not portfolio_returns.empty:
+        st.plotly_chart(px.line(portfolio_returns, x=portfolio_returns.index, y="Net Value", title="Portfolio Net Equity Curve"), use_container_width=True)
+
+
+def render_market_regime_tab(close, regime):
+    st.header("Market Regime")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Detected Regime", regime["regime_name"])
+    c2.metric("Confidence", f"{regime['confidence']:.0%}")
+    c3.metric("Detection Date", regime["date"])
+    st.write(regime["regime_explanation"])
+    indicator_df = pd.DataFrame(
+        [{"Indicator": key, "Value": value} for key, value in regime["key_indicators"].items()]
+    )
+    st.subheader("Key Indicators")
+    st.dataframe(indicator_df.style.format({"Value": "{:.2%}"}), use_container_width=True)
+    st.subheader("ETF Proxy Performance")
+    proxy_symbols = ["SPY", "QQQ", "IWM", "XLK", "XLF", "XLE", "GLD", "TLT", "SHY", "BIL", "USMV", "SPLV"]
+    proxy_table = build_market_monitoring_table(close, proxy_symbols)
+    st.dataframe(
+        proxy_table.style.format(
+            {
+                "Latest Price": "${:,.2f}",
+                "1D Return": "{:.2%}",
+                "5D Return": "{:.2%}",
+                "20D Return": "{:.2%}",
+                "60D Return": "{:.2%}",
+                "20D Realized Volatility": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+    history = build_regime_history(close)
+    if not history.empty:
+        st.subheader("Regime History")
+        fig = px.scatter(history.reset_index(), x="Date", y="Regime", color="Regime", size="Confidence", title="Historical Regime Timeline")
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def render_strategy_allocation_tab(strategy_allocation):
+    st.header("Strategy Allocation")
+    st.dataframe(
+        strategy_allocation.style.format(
+            {
+                "Base Weight": "{:.2%}",
+                "Regime Fit Score": "{:.2f}",
+                "Recent Performance Score": "{:.2f}",
+                "Risk Adjusted Score": "{:.2f}",
+                "Drawdown Penalty": "{:.2f}",
+                "Risk Limit Penalty": "{:.2f}",
+                "Final Score": "{:.2f}",
+                "Final Allocation": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+    st.plotly_chart(px.bar(strategy_allocation, x="Strategy", y="Final Allocation", title="Regime-Aware Strategy Weights"), use_container_width=True)
+
+
+def render_stock_selection_tab(stock_selection):
+    st.header("Stock Selection")
+    if stock_selection.empty:
+        st.warning("Stock selection is unavailable. Check stock data or reduce lookback requirements.")
+        return
+    st.subheader("Ranked Stock Candidates")
+    display_cols = [
+        "Ticker",
+        "Category",
+        "Stock Score",
+        "Current Price",
+        "20D Return",
+        "60D Return",
+        "120D Return",
+        "Volatility",
+        "Drawdown",
+        "Relative Strength vs SPY",
+        "Trend Status",
+        "Reason",
+    ]
+    st.dataframe(
+        stock_selection[display_cols].style.format(
+            {
+                "Stock Score": "{:.2f}",
+                "Current Price": "${:,.2f}",
+                "20D Return": "{:.2%}",
+                "60D Return": "{:.2%}",
+                "120D Return": "{:.2%}",
+                "Volatility": "{:.2%}",
+                "Drawdown": "{:.2%}",
+                "Relative Strength vs SPY": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+    st.plotly_chart(px.bar(stock_selection, x="Ticker", y="Stock Score", color="Category", title="Top Regime-Aware Stock Scores"), use_container_width=True)
+
+
+def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets, max_position_weight=0.10, max_sector_exposure=0.35):
+    warnings = []
+    if portfolio_metrics.get("max_drawdown", 0) < RISK_LIMITS["severe_drawdown_warning"]:
+        warnings.append("Severe portfolio drawdown breach.")
+    elif portfolio_metrics.get("max_drawdown", 0) < RISK_LIMITS["max_drawdown_warning"]:
+        warnings.append("Portfolio drawdown warning.")
+    if not position_allocation.empty and position_allocation["Weight"].max() > max_position_weight:
+        warnings.append("Top holding exceeds max position weight.")
+    if asset_targets.get("Cash / SHY / BIL", 0) < 0.15 and portfolio_metrics.get("recommendation", "").lower().startswith("hedge"):
+        warnings.append("Cash allocation may be too low for the detected risk level.")
+    status = "Breach" if any("breach" in warning.lower() for warning in warnings) else "Watch" if warnings else "OK"
+    return {"Status": status, "Warnings": warnings or ["No major risk limit warnings."]}
+
+
+def render_risk_dashboard(results, close, portfolio_metrics, position_allocation, asset_targets, max_position_weight, max_sector_exposure):
+    st.header("Risk Dashboard")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Portfolio Volatility", f"{portfolio_metrics.get('volatility', np.nan) * 100:.2f}%")
+    c2.metric("Portfolio Sharpe", f"{portfolio_metrics.get('sharpe', np.nan):.2f}")
+    c3.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
+    c4.metric("Cash Allocation", f"{asset_targets.get('Cash / SHY / BIL', 0) * 100:.1f}%")
+    risk_status = build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets, max_position_weight, max_sector_exposure)
+    if risk_status["Status"] == "OK":
+        st.success("Risk limit status: OK")
+    elif risk_status["Status"] == "Watch":
+        st.warning("Risk limit status: Watch")
+    else:
+        st.error("Risk limit status: Breach")
+    for warning in risk_status["Warnings"]:
+        st.write(f"- {warning}")
+
+    correlations = calculate_strategy_correlations(results)
+    if not correlations.empty:
+        st.plotly_chart(px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Matrix", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
+    exposures = estimate_factor_exposures(results, close)
+    if not exposures.empty:
+        portfolio_exposure = exposures.mean().sort_values()
+        st.plotly_chart(px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"), use_container_width=True)
+        st.dataframe(exposures.style.format("{:.2f}"), use_container_width=True)
+    risk_contributions = calculate_strategy_risk_contributions(results)
+    if not risk_contributions.empty:
+        st.plotly_chart(px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Risk Contribution by Strategy"), use_container_width=True)
+    st.subheader("Position Concentration")
+    st.dataframe(position_allocation.style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
+
+
 def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL):
     st.header("Strategies Live Monitoring")
     table = build_strategy_monitoring_table(results, initial_capital=initial_capital)
@@ -2027,7 +2597,7 @@ def render_strategy_correlation(results):
 
 def build_market_monitoring_table(close, symbols):
     rows = []
-    returns = close.pct_change()
+    returns = close.pct_change(fill_method=None)
     for symbol in symbols:
         if symbol not in close.columns:
             continue
@@ -2043,10 +2613,10 @@ def build_market_monitoring_table(close, symbols):
             {
                 "Ticker": symbol,
                 "Latest Price": latest_price,
-                "1D Return": series.pct_change(1).iloc[-1],
-                "5D Return": series.pct_change(5).iloc[-1] if len(series) > 5 else np.nan,
-                "20D Return": series.pct_change(20).iloc[-1] if len(series) > 20 else np.nan,
-                "60D Return": series.pct_change(60).iloc[-1] if len(series) > 60 else np.nan,
+                "1D Return": series.pct_change(1, fill_method=None).iloc[-1],
+                "5D Return": series.pct_change(5, fill_method=None).iloc[-1] if len(series) > 5 else np.nan,
+                "20D Return": series.pct_change(20, fill_method=None).iloc[-1] if len(series) > 20 else np.nan,
+                "60D Return": series.pct_change(60, fill_method=None).iloc[-1] if len(series) > 60 else np.nan,
                 "20D Realized Volatility": vol20,
                 "Trend Status": trend_status,
             }
@@ -2054,24 +2624,131 @@ def build_market_monitoring_table(close, symbols):
     return pd.DataFrame(rows)
 
 
-def classify_market_regime(close):
-    if "SPY" not in close.columns:
-        return "Neutral", "SPY data is not available."
+def get_relative_return(close, symbol, benchmark="SPY", window=60):
+    if symbol not in close.columns or benchmark not in close.columns or len(close) <= window:
+        return np.nan
+    return close[symbol].pct_change(window, fill_method=None).iloc[-1] - close[benchmark].pct_change(window, fill_method=None).iloc[-1]
+
+
+def detect_market_regime(close):
+    if close.empty or "SPY" not in close.columns:
+        return {
+            "regime_name": "Sideways / Choppy Market",
+            "regime_score": 0.0,
+            "confidence": 0.0,
+            "regime_explanation": "SPY data is unavailable, so the detector defaults to Sideways / Choppy Market.",
+            "key_indicators": {},
+            "date": "N/A",
+        }
     spy = close["SPY"].dropna()
     if len(spy) < 200:
-        return "Neutral", "Not enough SPY history for MA50 / MA200 regime check."
-    spy_return = spy.pct_change()
-    ma50 = spy.rolling(50).mean().iloc[-1]
-    ma200 = spy.rolling(200).mean().iloc[-1]
-    vol20 = spy_return.rolling(20).std().iloc[-1] * np.sqrt(252)
-    price = spy.iloc[-1]
-    if vol20 > 0.30:
-        return "High Volatility", "SPY 20D realized volatility is above the high-volatility threshold."
-    if price > ma50 and price > ma200:
-        return "Risk-On", "SPY is above MA50 and MA200, and realized volatility is not elevated."
-    if price < ma50 and price < ma200:
-        return "Risk-Off", "SPY is below both MA50 and MA200."
-    return "Neutral", "SPY trend is mixed."
+        return {
+            "regime_name": "Sideways / Choppy Market",
+            "regime_score": 0.0,
+            "confidence": 0.25,
+            "regime_explanation": "Not enough history for full MA200 and regime checks.",
+            "key_indicators": {"available_days": len(spy)},
+            "date": spy.index[-1].strftime("%Y-%m-%d") if not spy.empty else "N/A",
+        }
+
+    returns = close.pct_change(fill_method=None)
+    spy_20d = spy.pct_change(20, fill_method=None).iloc[-1]
+    spy_60d = spy.pct_change(60, fill_method=None).iloc[-1]
+    spy_120d = spy.pct_change(120, fill_method=None).iloc[-1]
+    spy_ma200 = spy.rolling(200).mean().iloc[-1]
+    spy_dist_ma200 = spy.iloc[-1] / spy_ma200 - 1
+    spy_vol20 = returns["SPY"].rolling(20).std().iloc[-1] * np.sqrt(252)
+    spy_60d_drawdown = (spy.tail(60) / spy.tail(60).cummax() - 1).min()
+    qqq_rel = get_relative_return(close, "QQQ", "SPY", 60)
+    xlk_rel = get_relative_return(close, "XLK", "SPY", 60)
+    xlf_rel = get_relative_return(close, "XLF", "SPY", 60)
+    xle_rel = get_relative_return(close, "XLE", "SPY", 60)
+    gld_60d = close["GLD"].pct_change(60, fill_method=None).iloc[-1] if "GLD" in close.columns else np.nan
+    tlt_60d = close["TLT"].pct_change(60, fill_method=None).iloc[-1] if "TLT" in close.columns else np.nan
+    spy_tlt_corr = returns[["SPY", "TLT"]].dropna().tail(60).corr().iloc[0, 1] if "TLT" in returns.columns else np.nan
+
+    scores = {regime: 0.0 for regime in REGIME_NAMES}
+    if spy_dist_ma200 < 0 and spy_60d < -0.08 and spy_vol20 > 0.25:
+        scores["High Volatility / Crisis"] += 1.0
+    if spy_dist_ma200 < 0 and spy_60d < -0.05:
+        scores["Risk-Off Bear Market"] += 0.9
+    if spy_dist_ma200 > 0 and spy_60d > 0.03 and spy_120d > 0.05:
+        scores["Risk-On Bull Market"] += 0.8
+    if spy_dist_ma200 > 0 and qqq_rel > 0.02 and xlk_rel > 0.02:
+        scores["Growth-Led Market"] += 1.0
+    if xle_rel > 0.03 and pd.notna(gld_60d) and gld_60d > 0.03 and spy_60d < 0.04:
+        scores["Inflation / Commodity-Led Market"] += 0.9
+    if pd.notna(tlt_60d) and tlt_60d > spy_60d + 0.05 and spy_60d < 0.02:
+        scores["Falling Rates / Bond Rally"] += 0.8
+    if xlf_rel > 0.02 and spy_dist_ma200 > 0:
+        scores["Value / Financials-Led Market"] += 0.7
+    if abs(spy_60d) < 0.04 and spy_vol20 > 0.14:
+        scores["Sideways / Choppy Market"] += 0.7
+    if spy_vol20 > 0.30:
+        scores["High Volatility / Crisis"] += 0.5
+    if spy_60d_drawdown < -0.10:
+        scores["Risk-Off Bear Market"] += 0.3
+
+    regime_name = max(scores, key=scores.get)
+    regime_score = scores[regime_name]
+    confidence = min(1.0, max(0.20, regime_score))
+    if regime_score == 0:
+        regime_name = "Sideways / Choppy Market"
+        confidence = 0.35
+
+    indicators = {
+        "SPY 20D Return": spy_20d,
+        "SPY 60D Return": spy_60d,
+        "SPY 120D Return": spy_120d,
+        "SPY Distance From MA200": spy_dist_ma200,
+        "SPY 20D Realized Volatility": spy_vol20,
+        "SPY 60D Max Drawdown": spy_60d_drawdown,
+        "QQQ vs SPY 60D Relative Strength": qqq_rel,
+        "XLK vs SPY 60D Relative Strength": xlk_rel,
+        "XLF vs SPY 60D Relative Strength": xlf_rel,
+        "XLE vs SPY 60D Relative Strength": xle_rel,
+        "GLD 60D Return": gld_60d,
+        "TLT 60D Return": tlt_60d,
+        "SPY / TLT 60D Correlation": spy_tlt_corr,
+    }
+    explanation = (
+        f"Detected {regime_name} using SPY trend, realized volatility, ETF relative strength, "
+        "commodity proxies, and bond proxy behavior."
+    )
+    return {
+        "regime_name": regime_name,
+        "regime_score": regime_score,
+        "confidence": confidence,
+        "regime_explanation": explanation,
+        "key_indicators": indicators,
+        "date": spy.index[-1].strftime("%Y-%m-%d"),
+    }
+
+
+def build_regime_history(close):
+    if close.empty:
+        return pd.DataFrame()
+    rows = []
+    month_ends = close.resample("ME").last().index
+    for date in month_ends:
+        history = close.loc[:date]
+        if len(history) < 200:
+            continue
+        regime = detect_market_regime(history)
+        rows.append(
+            {
+                "Date": date,
+                "Regime": regime["regime_name"],
+                "Confidence": regime["confidence"],
+                "Score": regime["regime_score"],
+            }
+        )
+    return pd.DataFrame(rows).set_index("Date") if rows else pd.DataFrame()
+
+
+def classify_market_regime(close):
+    regime = detect_market_regime(close)
+    return regime["regime_name"], regime["regime_explanation"]
 
 
 def render_market_monitoring(close):
@@ -2104,7 +2781,7 @@ def render_market_monitoring(close):
 
 def build_factor_returns(close):
     factor_returns = {}
-    returns = close.pct_change().dropna()
+    returns = close.pct_change(fill_method=None).dropna()
     for factor, symbols in FACTOR_PROXIES.items():
         available = [symbol for symbol in symbols if symbol in returns.columns]
         if available:
@@ -2282,7 +2959,7 @@ def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, sele
     drawdown = portfolio_returns["Net Value"] / portfolio_returns["Net Value"].cummax() - 1
     st.plotly_chart(px.area(x=drawdown.index, y=drawdown, title="Portfolio Drawdown"), use_container_width=True)
 
-    monthly_returns = portfolio_returns["Net Value"].resample("ME").last().pct_change().dropna().to_frame("Portfolio Monthly Return")
+    monthly_returns = portfolio_returns["Net Value"].resample("ME").last().pct_change(fill_method=None).dropna().to_frame("Portfolio Monthly Return")
     if not monthly_returns.empty:
         st.subheader("Portfolio Monthly Returns")
         st.dataframe(monthly_returns.style.format("{:.2%}"), use_container_width=True)
@@ -2351,6 +3028,80 @@ def render_stress_period_analysis(results, portfolio_returns, benchmark_symbol):
         )
     stress_df = pd.DataFrame(rows)
     st.dataframe(stress_df.style.format({"Portfolio Return": "{:.2%}", f"{benchmark_symbol} Return": "{:.2%}", "Drawdown": "{:.2%}"}), use_container_width=True)
+
+
+def build_dynamic_allocation_backtest(results, close, max_strategy_weight=0.25, benchmark_symbol="SPY"):
+    strategy_returns = get_strategy_returns_frame(results)
+    if strategy_returns.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    month_ends = strategy_returns.resample("ME").last().index
+    dynamic_returns = pd.Series(0.0, index=strategy_returns.index)
+    allocation_rows = []
+    for idx in range(6, len(month_ends) - 1):
+        signal_date = month_ends[idx]
+        next_date = month_ends[idx + 1]
+        history_close = close.loc[:signal_date]
+        regime = detect_market_regime(history_close)
+        allocation_table = build_regime_aware_strategy_allocation(results, regime, max_strategy_weight=max_strategy_weight)
+        weights = allocation_table.set_index("Strategy")["Final Allocation"].reindex(strategy_returns.columns).fillna(0.0)
+        period_mask = (strategy_returns.index > signal_date) & (strategy_returns.index <= next_date)
+        dynamic_returns.loc[period_mask] = strategy_returns.loc[period_mask].mul(weights, axis=1).sum(axis=1)
+        allocation_rows.append(
+            {
+                "Date": signal_date,
+                "Regime": regime["regime_name"],
+                "Confidence": regime["confidence"],
+                **{strategy: weights.get(strategy, 0.0) for strategy in strategy_returns.columns},
+            }
+        )
+    dynamic_returns = dynamic_returns.loc[dynamic_returns != 0]
+    common_index = strategy_returns.index.intersection(dynamic_returns.index)
+    equal_weight_returns = strategy_returns.loc[common_index].mean(axis=1)
+    spy_returns = close[benchmark_symbol].pct_change(fill_method=None).reindex(common_index).fillna(0.0) if benchmark_symbol in close.columns else pd.Series(0.0, index=common_index)
+    backtest = pd.DataFrame(
+        {
+            "Dynamic Regime-Aware Allocation": dynamic_returns.reindex(common_index).fillna(0.0),
+            "Equal-Weight Strategy Allocation": equal_weight_returns,
+            f"{benchmark_symbol} Benchmark": spy_returns,
+        }
+    )
+    return backtest, pd.DataFrame(allocation_rows).set_index("Date") if allocation_rows else pd.DataFrame()
+
+
+def render_dynamic_backtest(results, close, max_strategy_weight, benchmark_symbol):
+    st.subheader("Dynamic Regime-Aware Walk-Forward Backtest")
+    backtest, allocation_history = build_dynamic_allocation_backtest(results, close, max_strategy_weight=max_strategy_weight, benchmark_symbol=benchmark_symbol)
+    if backtest.empty:
+        st.warning("Not enough data for dynamic allocation backtest.")
+        return
+    equity = (1 + backtest).cumprod()
+    st.plotly_chart(px.line(equity, x=equity.index, y=equity.columns, title="Dynamic Allocation vs Equal-Weight vs Benchmark"), use_container_width=True)
+    rows = []
+    for column in backtest.columns:
+        returns = backtest[column].dropna()
+        eq = (1 + returns).cumprod()
+        rows.append(
+            {
+                "Series": column,
+                "Cumulative Return": eq.iloc[-1] - 1,
+                "Annualized Volatility": returns.std() * np.sqrt(252),
+                "Sharpe Ratio": returns.mean() * 252 / (returns.std() * np.sqrt(252)) if returns.std() > 0 else np.nan,
+                "Max Drawdown": (eq / eq.cummax() - 1).min(),
+            }
+        )
+    st.dataframe(pd.DataFrame(rows).style.format({"Cumulative Return": "{:.2%}", "Annualized Volatility": "{:.2%}", "Sharpe Ratio": "{:.2f}", "Max Drawdown": "{:.2%}"}), use_container_width=True)
+    rolling_sharpe = backtest["Dynamic Regime-Aware Allocation"].rolling(63).mean() * 252 / (backtest["Dynamic Regime-Aware Allocation"].rolling(63).std() * np.sqrt(252))
+    st.plotly_chart(px.line(x=rolling_sharpe.index, y=rolling_sharpe, title="Dynamic Allocation Rolling Sharpe"), use_container_width=True)
+    dynamic_equity = equity["Dynamic Regime-Aware Allocation"]
+    rolling_drawdown = dynamic_equity / dynamic_equity.cummax() - 1
+    st.plotly_chart(px.area(x=rolling_drawdown.index, y=rolling_drawdown, title="Dynamic Allocation Rolling Drawdown"), use_container_width=True)
+    monthly_returns = equity["Dynamic Regime-Aware Allocation"].resample("ME").last().pct_change(fill_method=None).dropna().to_frame("Dynamic Monthly Return")
+    annual_returns = equity["Dynamic Regime-Aware Allocation"].resample("YE").last().pct_change(fill_method=None).dropna().to_frame("Dynamic Annual Return")
+    st.dataframe(monthly_returns.style.format("{:.2%}"), use_container_width=True)
+    st.dataframe(annual_returns.style.format("{:.2%}"), use_container_width=True)
+    if not allocation_history.empty:
+        st.subheader("Regime Timeline")
+        st.plotly_chart(px.scatter(allocation_history.reset_index(), x="Date", y="Regime", color="Regime", size="Confidence"), use_container_width=True)
 
 
 def render_walk_forward_placeholder(portfolio_returns):
@@ -2459,10 +3210,10 @@ def ai_style_summary(performance, volatility, signal, window):
 
 
 def main():
-    st.title("Multi-Strategy Portfolio Risk Management Dashboard")
+    st.title("Regime-Aware Multi-Strategy Portfolio Dashboard")
     st.write(
-        "A first-version risk manager dashboard for monitoring ETF strategy sleeves as one hypothetical portfolio. "
-        "Transaction costs use 5 bps for buys and 5 bps for sells."
+        "A first-version regime-aware allocation, risk management, ETF strategy, and stock selection dashboard. "
+        "Signals and backtests use daily bars; transaction costs use 5 bps for buys and 5 bps for sells."
     )
 
     st.sidebar.header("Settings")
@@ -2483,10 +3234,28 @@ def main():
     ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
     selected_strategy = st.sidebar.selectbox("Strategy Detail", STRATEGY_SLEEVE_TYPES, index=0)
     backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
+    portfolio_mode = st.sidebar.selectbox("Portfolio Mode", PORTFOLIO_MODES, index=2)
+    top_n_stocks = st.sidebar.slider("Top N Stocks", min_value=3, max_value=25, value=10, step=1)
     benchmark_symbol = st.sidebar.selectbox("Benchmark", all_etf_symbols, index=ma_default_index)
     transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps per buy/sell)", min_value=0, max_value=100, value=5, step=1)
     transaction_cost = transaction_cost_bps / 10000
-    initial_portfolio_value = INITIAL_CAPITAL
+    initial_portfolio_value = st.sidebar.number_input("Initial Capital", min_value=10000, value=INITIAL_CAPITAL, step=50000)
+    rebalance_frequency = st.sidebar.selectbox("Rebalance Frequency", REBALANCE_FREQUENCIES, index=2)
+    risk_free_rate = st.sidebar.number_input("Risk-Free Rate", min_value=0.0, max_value=0.10, value=0.0, step=0.005)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Allocation Settings")
+    default_etf_weight = 0.70 if portfolio_mode == "ETF-only" else 0.0 if portfolio_mode == "Stock-only" else 0.60
+    default_stock_weight = 0.0 if portfolio_mode == "ETF-only" else 0.90 if portfolio_mode == "Stock-only" else 0.30
+    default_cash_weight = 1 - default_etf_weight - default_stock_weight
+    etf_allocation_pct = st.sidebar.slider("ETF Allocation %", 0, 100, int(default_etf_weight * 100), step=5) / 100
+    stock_allocation_pct = st.sidebar.slider("Stock Allocation %", 0, 100, int(default_stock_weight * 100), step=5) / 100
+    cash_allocation_pct = st.sidebar.slider("Cash Allocation %", 0, 100, int(default_cash_weight * 100), step=5) / 100
+    max_strategy_weight = st.sidebar.slider("Max Strategy Weight", 0.05, 0.50, RISK_LIMITS["max_strategy_weight"], step=0.01)
+    max_position_weight = st.sidebar.slider("Max Position Weight", 0.02, 0.25, RISK_LIMITS["max_position_weight"], step=0.01)
+    max_sector_exposure = st.sidebar.slider("Max Sector Exposure", 0.10, 0.60, RISK_LIMITS["max_sector_exposure"], step=0.05)
+    risk_off_cash_min = st.sidebar.slider("Risk-Off Cash Minimum", 0.0, 0.50, RISK_LIMITS["risk_off_cash_minimum"], step=0.05)
+    enable_cash_allocation = st.sidebar.checkbox("Enable Cash Allocation", value=True)
+    show_advanced_metrics = st.sidebar.checkbox("Show Advanced Metrics", value=True)
 
     st.sidebar.markdown("---")
     st.sidebar.write("**ETF universe includes:**")
@@ -2497,6 +3266,7 @@ def main():
     backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
     required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
     backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | set(selected_tickers) | required_strategy_symbols))
+    stock_symbols = tuple(sorted(get_all_stock_symbols()))
 
     with st.spinner("Downloading cached daily OHLCV ETF data..."):
         backtest_ohlcv = load_backtest_ohlcv_data(
@@ -2510,6 +3280,13 @@ def main():
         return
 
     backtest_close = backtest_ohlcv["close"].copy()
+    with st.spinner("Downloading cached daily stock data..."):
+        stock_close = load_close_data(
+            stock_symbols,
+            backtest_start.strftime("%Y-%m-%d"),
+            backtest_end.strftime("%Y-%m-%d"),
+        )
+    backtest_close, stock_close, benchmark_close = align_market_data(backtest_close, stock_close, benchmark_symbol=benchmark_symbol)
     refresh_time = pd.Timestamp.now(tz="America/New_York").strftime("%Y-%m-%d %H:%M:%S %Z")
     st.caption(
         f"Using one cached daily OHLCV download for {len(backtest_close.columns)} ETFs from "
@@ -2542,46 +3319,89 @@ def main():
         return
 
     portfolio_returns, portfolio_metrics = build_portfolio_backtest(strategy_results, initial_capital=initial_portfolio_value)
+    regime = detect_market_regime(backtest_close)
+    strategy_allocation = build_regime_aware_strategy_allocation(strategy_results, regime, max_strategy_weight=max_strategy_weight)
+    asset_targets = adjust_asset_class_targets(
+        regime["regime_name"],
+        etf_allocation_pct,
+        stock_allocation_pct,
+        cash_allocation_pct,
+        enable_cash=enable_cash_allocation,
+        risk_off_cash_min=risk_off_cash_min,
+    )
+    if portfolio_mode == "ETF-only":
+        asset_targets = adjust_asset_class_targets(regime["regime_name"], 0.90, 0.0, 0.10, enable_cash_allocation, risk_off_cash_min)
+    elif portfolio_mode == "Stock-only":
+        asset_targets = adjust_asset_class_targets(regime["regime_name"], 0.0, 0.90, 0.10, enable_cash_allocation, risk_off_cash_min)
+    stock_selection = calculate_stock_selection(stock_close, benchmark_close, regime, top_n=top_n_stocks)
+    position_allocation = build_position_allocation(
+        strategy_results,
+        strategy_allocation,
+        stock_selection,
+        asset_targets,
+        initial_portfolio_value,
+        max_position_weight=max_position_weight,
+    )
 
-    portfolio_tab, monitoring_tab, market_tab, risk_tab, backtesting_tab, workflow_tab = st.tabs(
+    portfolio_tab, regime_tab, strategy_allocation_tab, etf_signals_tab, stock_selection_tab, risk_tab, backtesting_tab = st.tabs(
         [
             "Portfolio Overview",
-            "Strategies Live Monitoring",
-            "Market Monitoring",
-            "Risk Factors",
-            "Backtesting",
-            "Strategy Workflow",
+            "Market Regime",
+            "Strategy Allocation",
+            "ETF Signals",
+            "Stock Selection",
+            "Risk Dashboard",
+            "Backtest / Walk-Forward",
         ]
     )
 
     with portfolio_tab:
-        render_clean_portfolio_overview(
+        render_regime_aware_portfolio_overview(
             strategy_results,
             portfolio_returns,
             portfolio_metrics,
+            regime,
+            strategy_allocation,
+            asset_targets,
+            position_allocation,
             initial_capital=initial_portfolio_value,
         )
 
-    with monitoring_tab:
+    with regime_tab:
+        render_market_regime_tab(backtest_close, regime)
+
+    with strategy_allocation_tab:
+        render_strategy_allocation_tab(strategy_allocation)
+
+    with etf_signals_tab:
         render_clean_strategy_monitoring(strategy_results, initial_capital=initial_portfolio_value)
 
-    with market_tab:
-        render_market_monitoring(backtest_close)
+    with stock_selection_tab:
+        render_stock_selection_tab(stock_selection)
 
     with risk_tab:
-        render_risk_factors(
+        render_risk_dashboard(
             strategy_results,
             backtest_close,
-            formulaic_sleeve_result=formulaic_sleeve_result,
-            formulaic_alpha_results=formulaic_alpha_results,
-            formulaic_alpha_correlations=formulaic_alpha_correlations,
+            portfolio_metrics,
+            position_allocation,
+            asset_targets,
+            max_position_weight,
+            max_sector_exposure,
         )
+        if show_advanced_metrics:
+            with st.expander("Advanced factor and Formulaic Alpha details"):
+                render_risk_factors(
+                    strategy_results,
+                    backtest_close,
+                    formulaic_sleeve_result=formulaic_sleeve_result,
+                    formulaic_alpha_results=formulaic_alpha_results,
+                    formulaic_alpha_correlations=formulaic_alpha_correlations,
+                )
 
     with backtesting_tab:
         render_clean_backtesting(strategy_results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol)
-
-    with workflow_tab:
-        render_strategy_workflow(strategy_results)
+        render_dynamic_backtest(strategy_results, backtest_close, max_strategy_weight, benchmark_symbol)
 
     st.write("---")
     st.write("Built with Streamlit, yfinance, pandas, numpy, and plotly.")
