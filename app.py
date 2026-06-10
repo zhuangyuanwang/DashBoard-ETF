@@ -1391,7 +1391,7 @@ def get_current_holdings_text(result):
     return "N/A"
 
 
-def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None):
+def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None, etf_portfolio_weight=1.0):
     correlations = calculate_strategy_correlations(results)
     risk_contributions = calculate_strategy_risk_contributions(results)
     allocations, statuses = build_strategy_allocations(results)
@@ -1407,18 +1407,20 @@ def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, st
         risk_contribution = risk_contributions.get(strategy_name, np.nan)
         status = statuses.get(strategy_name, classify_strategy_status(result, max_corr, risk_contribution))
         action = recommended_action_from_status(status, max_corr, metrics.get("transaction_cost_drag", 0.0))
-        allocation = allocations.get(strategy_name, 0.0)
+        model_allocation = allocations.get(strategy_name, 0.0)
+        applied_allocation = model_allocation * etf_portfolio_weight
         daily_return = result["strategy_returns"].iloc[-1] if not result["strategy_returns"].empty else np.nan
         cumulative_return = result["strategy_equity"].iloc[-1] - 1 if not result["strategy_equity"].empty else np.nan
         rows.append(
             {
                 "Strategy": strategy_name,
-                "Allocation %": allocation,
-                "Allocation $": allocation * initial_capital,
+                "Strategy Model Weight": model_allocation,
+                "Portfolio Applied Weight": applied_allocation,
+                "Allocation $": applied_allocation * initial_capital,
                 "Current Holdings": get_current_holdings_text(result),
                 "Latest Signal": signal.get("Signal", "N/A"),
-                "Daily PnL": daily_return * allocation * initial_capital if pd.notna(daily_return) else np.nan,
-                "Cumulative PnL": cumulative_return * allocation * initial_capital if pd.notna(cumulative_return) else np.nan,
+                "Daily PnL": daily_return * applied_allocation * initial_capital if pd.notna(daily_return) else np.nan,
+                "Cumulative PnL": cumulative_return * applied_allocation * initial_capital if pd.notna(cumulative_return) else np.nan,
                 "Gross Return": metrics["gross_return"],
                 "Net Return": metrics["net_return"],
                 "Sharpe": metrics["sharpe"],
@@ -2000,16 +2002,26 @@ def render_risk_dashboard(results, close, portfolio_metrics, position_allocation
         )
 
 
-def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None):
+def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None, etf_portfolio_weight=1.0):
     st.header("Strategies Live Monitoring")
-    table = build_strategy_monitoring_table(results, initial_capital=initial_capital, strategy_allocation=strategy_allocation)
+    st.caption(
+        "Strategy Model Weight is the relative weight among ETF strategy sleeves. "
+        "Portfolio Applied Weight is the actual portfolio weight after the selected Portfolio Mode and ETF allocation are applied."
+    )
+    table = build_strategy_monitoring_table(
+        results,
+        initial_capital=initial_capital,
+        strategy_allocation=strategy_allocation,
+        etf_portfolio_weight=etf_portfolio_weight,
+    )
     if table.empty:
         st.warning("No strategy results are available.")
         return
     st.dataframe(
         table.style.format(
             {
-                "Allocation %": "{:.2%}",
+                "Strategy Model Weight": "{:.2%}",
+                "Portfolio Applied Weight": "{:.2%}",
                 "Allocation $": "${:,.0f}",
                 "Daily PnL": "${:,.0f}",
                 "Cumulative PnL": "${:,.0f}",
@@ -2290,7 +2302,7 @@ def render_strategy_results(result):
         st.dataframe(holdings_df.tail(24), use_container_width=True)
 
 
-def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol, strategy_allocation=None):
+def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol, strategy_allocation=None, etf_portfolio_weight=1.0):
     st.header("Backtesting")
     result = results.get(selected_strategy)
     if result is None:
@@ -2330,11 +2342,13 @@ def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, sele
         st.dataframe(monthly_returns.style.format("{:.2%}"), use_container_width=True)
 
     st.subheader("Strategy Returns Table")
-    table = build_strategy_monitoring_table(results, strategy_allocation=strategy_allocation)
+    table = build_strategy_monitoring_table(results, strategy_allocation=strategy_allocation, etf_portfolio_weight=etf_portfolio_weight)
     st.dataframe(
-        table[["Strategy", "Gross Return", "Net Return", "Sharpe", "Volatility", "Max Drawdown", "Current Drawdown", "Turnover", "Cost Drag"]]
+        table[["Strategy", "Strategy Model Weight", "Portfolio Applied Weight", "Gross Return", "Net Return", "Sharpe", "Volatility", "Max Drawdown", "Current Drawdown", "Turnover", "Cost Drag"]]
         .style.format(
             {
+                "Strategy Model Weight": "{:.2%}",
+                "Portfolio Applied Weight": "{:.2%}",
                 "Gross Return": "{:.2%}",
                 "Net Return": "{:.2%}",
                 "Sharpe": "{:.2f}",
@@ -2585,7 +2599,12 @@ def main():
         render_strategy_allocation_tab(strategy_allocation)
 
     with etf_signals_tab:
-        render_clean_strategy_monitoring(strategy_results, initial_capital=initial_portfolio_value, strategy_allocation=strategy_allocation)
+        render_clean_strategy_monitoring(
+            strategy_results,
+            initial_capital=initial_portfolio_value,
+            strategy_allocation=strategy_allocation,
+            etf_portfolio_weight=asset_targets.get("ETFs", 0.0),
+        )
 
     with stock_selection_tab:
         render_stock_selection_tab(stock_selection)
@@ -2602,7 +2621,15 @@ def main():
         )
 
     with backtesting_tab:
-        render_clean_backtesting(strategy_results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol, strategy_allocation=strategy_allocation)
+        render_clean_backtesting(
+            strategy_results,
+            portfolio_returns,
+            portfolio_metrics,
+            selected_strategy,
+            benchmark_symbol,
+            strategy_allocation=strategy_allocation,
+            etf_portfolio_weight=asset_targets.get("ETFs", 0.0),
+        )
         render_dynamic_backtest(strategy_results, backtest_close, max_strategy_weight, benchmark_symbol)
 
     st.write("---")
