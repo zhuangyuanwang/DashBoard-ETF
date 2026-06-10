@@ -24,20 +24,6 @@ STOCK_UNIVERSE = {
     "Consumer / Communication": ["NFLX", "DIS", "TSLA", "HD", "NKE"],
 }
 
-PERIOD_LABELS = {
-    "1mo": "1 Month",
-    "3mo": "3 Months",
-    "6mo": "6 Months",
-    "1y": "1 Year",
-}
-
-PERFORMANCE_WINDOWS = {
-    "1D": 1,
-    "5D": 5,
-    "1M": 22,
-    "3M": 66,
-}
-
 STRATEGY_TYPES = [
     "Momentum Rotation",
     "Moving Average Trend Following",
@@ -48,42 +34,11 @@ STRATEGY_TYPES = [
     "Breakout Strategy",
     "Mean Reversion Strategy",
     "Volatility Target Strategy",
-    "Equal Weight Multi-ETF Strategy",
 ]
-
-FORMULAIC_ALPHA_SLEEVE = "Formulaic Alpha Sleeve"
-STRATEGY_SLEEVE_TYPES = STRATEGY_TYPES + [FORMULAIC_ALPHA_SLEEVE]
-
-FORMULAIC_ALPHA_DEFINITIONS = [
-    {"name": "Open-Close Reversal Alpha", "category": "Reversal"},
-    {"name": "Overnight Gap Reversal Alpha", "category": "Reversal"},
-    {"name": "Short-Term Return Reversal Alpha", "category": "Reversal"},
-    {"name": "Volume Spike Reversal Alpha", "category": "Volume Reversal"},
-    {"name": "Typical Price Reversion Alpha", "category": "Reversion"},
-    {"name": "High-Low Range Breakout Alpha", "category": "Breakout"},
-    {"name": "Price-Volume Confirmation Alpha", "category": "Price-Volume"},
-    {"name": "Price-Volume Correlation Alpha", "category": "Price-Volume"},
-    {"name": "Low Volatility Reversal Alpha", "category": "Risk-Adjusted Reversal"},
-    {"name": "Rank-Based Multi-Factor Alpha", "category": "Multi-Factor"},
-]
-
-SUMMARY_CHOICES = ["Combined Strategy"] + STRATEGY_SLEEVE_TYPES
 
 DEFENSIVE_ETFS = ["TLT", "IEF", "GLD", "SHY", "XLV", "XLU"]
 RISK_ON_ETFS = ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLY", "XLI", "XLC", "EFA", "EEM"]
 INITIAL_CAPITAL = 1_000_000
-PORTFOLIO_START_DATE = pd.Timestamp("2026-06-04")
-BUY_TRANSACTION_COST = 0.0005
-SELL_TRANSACTION_COST = 0.0005
-DEFAULT_TRANSACTION_COST = 0.0005
-
-MARKET_GROUPS = {
-    "Equity": ["SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLV", "XLY", "XLP", "XLU", "XLI", "XLB", "XLRE", "XLC"],
-    "Rates": ["SHY", "IEF", "TLT", "AGG", "TIP"],
-    "Credit": ["HYG", "LQD"],
-    "Commodities / Inflation": ["GLD", "SLV", "DBC", "USO"],
-    "Geography": ["EFA", "EEM", "FXI", "VGK", "EWJ", "INDA"],
-}
 
 FACTOR_PROXIES = {
     "Equity / Growth": ["SPY", "QQQ"],
@@ -102,8 +57,6 @@ BACKTEST_PERIODS = {
     "10 Years": 10,
 }
 
-REBALANCE_FREQUENCIES = ["Daily", "Weekly", "Monthly"]
-SIGNAL_AGGREGATION_WINDOWS = [5, 10, 20, 30]
 PORTFOLIO_MODES = ["ETF-only", "Stock-only", "ETF + Stock"]
 
 REGIME_NAMES = [
@@ -178,19 +131,6 @@ STRATEGY_REGIME_SUITABILITY = {
         "Sideways / Choppy Market": "medium",
         "Risk-On Bull Market": "medium",
     },
-    "Equal Weight Multi-ETF Strategy": {
-        "Risk-On Bull Market": "medium",
-        "Growth-Led Market": "medium",
-        "Sideways / Choppy Market": "medium",
-        "Risk-Off Bear Market": "low",
-    },
-    FORMULAIC_ALPHA_SLEEVE: {
-        "Sideways / Choppy Market": "medium",
-        "Growth-Led Market": "medium",
-        "Risk-On Bull Market": "medium",
-        "Value / Financials-Led Market": "medium",
-        "High Volatility / Crisis": "low",
-    },
 }
 
 REGIME_STOCK_PREFERENCES = {
@@ -232,6 +172,10 @@ def get_stock_category_map():
     return {ticker: category for category, tickers in STOCK_UNIVERSE.items() for ticker in tickers}
 
 
+def get_etf_category_map():
+    return {ticker: category for category, tickers in ETF_UNIVERSE.items() for ticker in tickers}
+
+
 def clean_price_data(close, max_missing_ratio=0.15):
     if close.empty:
         return close
@@ -255,20 +199,6 @@ def extract_price_field(df, field, symbols):
     if isinstance(values, pd.Series):
         values = values.to_frame(name=symbols[0])
     return values.dropna(how="all")
-
-
-@st.cache_data(ttl=3600)
-def load_data(symbols, period):
-    symbols = tuple(sorted(symbols))
-    df = yf.download(symbols, period=period, interval="1d", auto_adjust=True, threads=True, progress=False)
-    if df.empty:
-        return pd.DataFrame()
-
-    return extract_close_prices(df, symbols)
-
-
-def compute_returns(close):
-    return close.pct_change(fill_method=None).dropna()
 
 
 def calculate_indicators(close):
@@ -305,10 +235,6 @@ def calculate_momentum_scores(indicators):
     return scores.dropna(how="all")
 
 
-def calculate_volatility(close, window=20):
-    return close.pct_change(fill_method=None).rolling(window).std() * np.sqrt(252)
-
-
 def available_symbols(close, symbols):
     return [symbol for symbol in symbols if symbol in close.columns]
 
@@ -318,36 +244,6 @@ def latest_valid_date(close, signal_date):
     if len(valid_dates) == 0:
         return None
     return valid_dates[-1]
-
-
-def build_line_chart(df, y, title, y_title):
-    fig = px.line(df, x=df.index, y=y, title=title)
-    fig.update_traces(mode="lines+markers", marker=dict(size=4, opacity=0.8))
-    fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title=y_title,
-        template="plotly_white",
-        margin=dict(l=10, r=10, t=40, b=30),
-        legend_title_text="Ticker",
-    )
-    return fig
-
-
-@st.cache_data(ttl=3600)
-def load_backtest_data(symbols, start_date, end_date):
-    symbols = tuple(sorted(set(symbols)))
-    df = yf.download(
-        symbols,
-        start=start_date,
-        end=end_date,
-        interval="1d",
-        auto_adjust=True,
-        threads=True,
-        progress=False,
-    )
-    if df.empty:
-        return pd.DataFrame()
-    return extract_close_prices(df, symbols)
 
 
 @st.cache_data(ttl=3600)
@@ -778,51 +674,7 @@ def generate_strategy_signal(strategy_type, close, ma_symbol="SPY"):
         reason = "HOLD signal because volatility is near the target range."
         return make_signal(strategy_type, signal_date, "SPY", "HOLD", max(25, 100 - strength), reason, 0)
 
-    if strategy_type == "Equal Weight Multi-ETF Strategy":
-        ma50 = indicators["ma50"].iloc[-1].dropna()
-        ma200 = indicators["ma200"].iloc[-1].dropna()
-        latest_close = close.iloc[-1].dropna()
-        valid = latest_close.index.intersection(ma50.index).intersection(ma200.index)
-        if len(valid) == 0:
-            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history to calculate MA50 and MA200 filters.", -1)
-        passing = latest_close[valid][(latest_close[valid] > ma50[valid]) & (latest_close[valid] > ma200[valid])].index.tolist()
-        strength = len(passing) / len(valid) * 100
-        if len(passing) >= max(3, len(valid) * 0.4):
-            reason = f"BUY signal because {len(passing)} out of {len(valid)} ETFs are above both MA50 and MA200."
-            return make_signal(strategy_type, signal_date, ", ".join(passing[:6]), "BUY", strength, reason, 1)
-        if passing:
-            reason = f"HOLD signal because only {len(passing)} out of {len(valid)} ETFs pass the trend filter."
-            return make_signal(strategy_type, signal_date, ", ".join(passing[:6]), "HOLD", strength, reason, 0)
-        reason = f"RISK-OFF signal because 0 out of {len(valid)} ETFs are above both MA50 and MA200."
-        return make_signal(strategy_type, signal_date, "SHY", "RISK-OFF", 100, reason, -1)
-
     return make_signal(strategy_type, signal_date, "N/A", "HOLD", 0, "Unknown strategy type.", 0)
-
-
-def generate_all_strategy_signals(close, ma_symbol="SPY"):
-    return {strategy_type: generate_strategy_signal(strategy_type, close, ma_symbol=ma_symbol) for strategy_type in STRATEGY_TYPES}
-
-
-def combine_strategy_signals(signals):
-    valid_signals = [signal for signal in signals.values() if signal is not None]
-    if not valid_signals:
-        return make_signal("Combined Strategy", "N/A", "Cash", "HOLD", 0, "No strategy signals are available.", 0)
-
-    average_vote = np.mean([signal["Vote"] for signal in valid_signals])
-    if average_vote >= 0.3:
-        final_signal = "BUY"
-    elif average_vote <= -0.3:
-        final_signal = "RISK-OFF"
-    else:
-        final_signal = "HOLD"
-
-    buy_assets = [signal["Selected Asset"] for signal in valid_signals if signal["Vote"] == 1]
-    selected_asset = buy_assets[0] if buy_assets else "Cash"
-    strength = abs(average_vote) * 100
-    reason = f"Combined vote score is {average_vote:.2f}. BUY/HOLD/RISK-OFF votes are averaged across the four strategies."
-    latest_dates = [signal["Latest Signal Date"] for signal in valid_signals if signal["Latest Signal Date"] != "N/A"]
-    latest_date = max(latest_dates) if latest_dates else "N/A"
-    return make_signal("Combined Strategy", latest_date, selected_asset, final_signal, strength, reason, average_vote)
 
 
 def run_momentum_backtest(close, top_n=3, lookback_months=3, transaction_cost=0.0005, benchmark_symbol="SPY"):
@@ -1273,269 +1125,6 @@ def run_all_strategy_backtests(close, transaction_cost, ma_symbol="SPY", benchma
     return results
 
 
-def cross_sectional_rank(df):
-    return df.rank(axis=1, pct=True)
-
-
-def rolling_pairwise_corr(left, right, window):
-    corr = pd.DataFrame(index=left.index, columns=left.columns, dtype=float)
-    for column in left.columns:
-        if column in right.columns:
-            corr[column] = left[column].rolling(window).corr(right[column])
-    return corr
-
-
-def calculate_formulaic_alpha_scores(alpha_name, ohlcv):
-    open_price = ohlcv["open"]
-    high = ohlcv["high"]
-    low = ohlcv["low"]
-    close = ohlcv["close"]
-    volume = ohlcv["volume"]
-    returns = close.pct_change(fill_method=None)
-    typical_price = (high + low + close) / 3
-    adv20 = volume.rolling(20).mean()
-    vol20 = returns.rolling(20).std()
-
-    if alpha_name == "Open-Close Reversal Alpha":
-        return -1 * ((close - open_price) / open_price)
-    if alpha_name == "Overnight Gap Reversal Alpha":
-        gap = open_price / close.shift(1) - 1
-        return -1 * gap
-    if alpha_name == "Short-Term Return Reversal Alpha":
-        recent_return = close.pct_change(5, fill_method=None)
-        return -1 * recent_return
-    if alpha_name == "Volume Spike Reversal Alpha":
-        volume_ratio = volume / adv20
-        price_move = close.pct_change(1, fill_method=None)
-        return -1 * price_move * cross_sectional_rank(volume_ratio)
-    if alpha_name == "Typical Price Reversion Alpha":
-        distance = close / typical_price - 1
-        return -1 * distance
-    if alpha_name == "High-Low Range Breakout Alpha":
-        rolling_high = high.rolling(20).max().shift(1)
-        rolling_low = low.rolling(20).min().shift(1)
-        return close / rolling_high - close / rolling_low
-    if alpha_name == "Price-Volume Confirmation Alpha":
-        momentum = close.pct_change(5, fill_method=None)
-        volume_change = volume.pct_change(5, fill_method=None)
-        return momentum * cross_sectional_rank(volume_change)
-    if alpha_name == "Price-Volume Correlation Alpha":
-        price_ret = close.pct_change(fill_method=None)
-        volume_ret = volume.pct_change(fill_method=None)
-        corr = rolling_pairwise_corr(price_ret, volume_ret, 10)
-        return corr * close.pct_change(5, fill_method=None)
-    if alpha_name == "Low Volatility Reversal Alpha":
-        recent_return = close.pct_change(5, fill_method=None)
-        return -1 * recent_return / vol20.replace(0, np.nan)
-    if alpha_name == "Rank-Based Multi-Factor Alpha":
-        reversal_rank = cross_sectional_rank(-1 * close.pct_change(5, fill_method=None))
-        volume_rank = cross_sectional_rank(volume / adv20)
-        volatility_rank = cross_sectional_rank(-1 * vol20)
-        trend_rank = cross_sectional_rank(close.pct_change(20, fill_method=None))
-        return 0.35 * reversal_rank + 0.25 * trend_rank + 0.20 * volume_rank + 0.20 * volatility_rank
-    return pd.DataFrame(index=close.index, columns=close.columns)
-
-
-def scores_to_target_weights(scores, close_columns, top_n=3):
-    target_weights = pd.DataFrame(0.0, index=scores.index, columns=close_columns)
-    for date, row in scores.iterrows():
-        ranked = row.replace([np.inf, -np.inf], np.nan).dropna().sort_values(ascending=False)
-        if ranked.empty:
-            if "SHY" in target_weights.columns:
-                target_weights.at[date, "SHY"] = 1.0
-            continue
-        selected = ranked[ranked > 0].head(top_n).index.tolist()
-        if selected:
-            target_weights.loc[date, selected] = 1.0 / len(selected)
-        elif "SHY" in target_weights.columns:
-            target_weights.at[date, "SHY"] = 1.0
-    return target_weights
-
-
-def calculate_simple_return_metrics(returns):
-    returns = returns.dropna()
-    if returns.empty:
-        return {
-            "total_return": np.nan,
-            "volatility": np.nan,
-            "sharpe": np.nan,
-            "max_drawdown": np.nan,
-            "current_drawdown": np.nan,
-        }
-    equity = (1 + returns).cumprod()
-    volatility = returns.std() * np.sqrt(252)
-    sharpe = returns.mean() * 252 / volatility if volatility > 0 else np.nan
-    drawdown = equity / equity.cummax() - 1
-    return {
-        "total_return": equity.iloc[-1] - 1,
-        "volatility": volatility,
-        "sharpe": sharpe,
-        "max_drawdown": drawdown.min(),
-        "current_drawdown": drawdown.iloc[-1],
-    }
-
-
-def classify_formulaic_alpha_status(metrics, turnover, cost_drag, avg_correlation):
-    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] <= -0.25:
-        return "Pause"
-    if pd.notna(metrics["max_drawdown"]) and metrics["max_drawdown"] <= -0.15:
-        return "Reduce"
-    if pd.notna(metrics["sharpe"]) and metrics["sharpe"] < 0:
-        return "Watch"
-    if turnover > 5 or cost_drag > 0.05 or abs(avg_correlation) > 0.85:
-        return "Watch"
-    return "Healthy"
-
-
-def run_single_formulaic_alpha(alpha, ohlcv, transaction_cost=DEFAULT_TRANSACTION_COST, top_n=3):
-    close = ohlcv["close"]
-    asset_returns = close.pct_change(fill_method=None).dropna()
-    scores = calculate_formulaic_alpha_scores(alpha["name"], ohlcv).reindex(asset_returns.index)
-    target_weights = scores_to_target_weights(scores, close.columns, top_n=top_n).reindex(asset_returns.index).fillna(0.0)
-    execution_weights = target_weights.shift(1).fillna(0.0)
-    gross_returns = (execution_weights * asset_returns).sum(axis=1)
-
-    weight_change = execution_weights.diff().fillna(execution_weights)
-    buy_turnover = weight_change.clip(lower=0).sum(axis=1)
-    sell_turnover = (-weight_change.clip(upper=0)).sum(axis=1)
-    trading_costs = buy_turnover * BUY_TRANSACTION_COST + sell_turnover * SELL_TRANSACTION_COST
-    if transaction_cost != DEFAULT_TRANSACTION_COST:
-        trading_costs = buy_turnover * transaction_cost + sell_turnover * transaction_cost
-    net_returns = gross_returns - trading_costs
-
-    gross_metrics = calculate_simple_return_metrics(gross_returns)
-    net_metrics = calculate_simple_return_metrics(net_returns)
-    latest_weights = target_weights.iloc[-1] if not target_weights.empty else pd.Series(dtype=float)
-    selected = latest_weights[latest_weights > 0].index.tolist()
-    latest_score = scores.iloc[-1].replace([np.inf, -np.inf], np.nan).dropna() if not scores.empty else pd.Series(dtype=float)
-    current_signal = "BUY" if selected and (not latest_score.empty and latest_score.max() > 0) else "DEFENSIVE"
-
-    return {
-        "name": alpha["name"],
-        "category": alpha["category"],
-        "scores": scores,
-        "target_weights": target_weights,
-        "execution_weights": execution_weights,
-        "gross_returns": gross_returns,
-        "net_returns": net_returns,
-        "trading_costs": trading_costs,
-        "turnover": buy_turnover + sell_turnover,
-        "gross_metrics": gross_metrics,
-        "metrics": net_metrics,
-        "selected_etfs": selected or ["Cash"],
-        "current_signal": current_signal,
-        "cost_drag": gross_metrics["total_return"] - net_metrics["total_return"],
-    }
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def run_formulaic_alpha_sleeve(ohlcv, transaction_cost=DEFAULT_TRANSACTION_COST, benchmark_symbol="SPY", top_n=3):
-    close = ohlcv["close"].dropna(how="all")
-    if close.empty:
-        return None, {}, pd.DataFrame(), pd.DataFrame()
-
-    alpha_results = {}
-    for alpha in FORMULAIC_ALPHA_DEFINITIONS:
-        alpha_results[alpha["name"]] = run_single_formulaic_alpha(alpha, ohlcv, transaction_cost=transaction_cost, top_n=top_n)
-
-    net_returns_df = pd.DataFrame({name: result["net_returns"] for name, result in alpha_results.items()}).dropna(how="all")
-    gross_returns_df = pd.DataFrame({name: result["gross_returns"] for name, result in alpha_results.items()}).dropna(how="all")
-    trading_costs_df = pd.DataFrame({name: result["trading_costs"] for name, result in alpha_results.items()}).dropna(how="all")
-    if net_returns_df.empty:
-        return None, alpha_results, pd.DataFrame(), pd.DataFrame()
-
-    common_index = net_returns_df.index.intersection(gross_returns_df.index)
-    net_returns_df = net_returns_df.loc[common_index].fillna(0.0)
-    gross_returns_df = gross_returns_df.loc[common_index].fillna(0.0)
-    trading_costs_df = trading_costs_df.reindex(common_index).fillna(0.0)
-
-    sleeve_net_returns = net_returns_df.mean(axis=1)
-    sleeve_gross_returns = gross_returns_df.mean(axis=1)
-    sleeve_trading_costs = trading_costs_df.mean(axis=1)
-
-    aggregate_weights = None
-    for result in alpha_results.values():
-        weights = result["target_weights"].reindex(common_index).fillna(0.0)
-        aggregate_weights = weights if aggregate_weights is None else aggregate_weights.add(weights, fill_value=0.0)
-    aggregate_weights = aggregate_weights / max(1, len(alpha_results))
-    current_holdings = aggregate_weights.iloc[-1][aggregate_weights.iloc[-1] > 0].sort_values(ascending=False)
-    selected_assets = current_holdings.index.tolist() or ["Cash"]
-    latest_signal = make_signal(
-        FORMULAIC_ALPHA_SLEEVE,
-        common_index[-1],
-        ", ".join(selected_assets[:6]),
-        "BUY" if selected_assets != ["Cash"] else "CASH",
-        min(100, len(selected_assets) / max(1, len(close.columns)) * 100),
-        "Equal-weight sleeve combining 10 simplified daily formulaic alpha models. Each alpha trades from T signal to T+1 execution.",
-        1 if selected_assets != ["Cash"] else -1,
-    )
-
-    monthly_holdings = []
-    for date, row in aggregate_weights.resample("ME").last().dropna(how="all").iterrows():
-        monthly_holdings.append(
-            {
-                "Date": date,
-                "Holdings": row[row > 0].index.tolist() or ["Cash"],
-                "Holdings_str": format_holdings(row),
-            }
-        )
-
-    sleeve_result = build_backtest_result(
-        close,
-        sleeve_net_returns,
-        FORMULAIC_ALPHA_SLEEVE,
-        benchmark_symbol=benchmark_symbol,
-        transaction_cost=transaction_cost,
-        rebalances=common_index.tolist(),
-        turnover_list=[result["turnover"].sum() / max(1, len(alpha_results)) for result in alpha_results.values()],
-        trading_costs=sleeve_trading_costs,
-        monthly_holdings=monthly_holdings,
-        latest_scores=build_formulaic_alpha_table(alpha_results, pd.DataFrame()),
-        summary_points=[
-            "Combines 10 simplified WorldQuant 101-inspired daily alpha models.",
-            "Each alpha ranks ETFs cross-sectionally and holds the top-ranked ETFs equally.",
-            "Signals use daily OHLCV data and trades execute with next-day weights to avoid look-ahead bias.",
-        ],
-    )
-    if sleeve_result is not None:
-        sleeve_result["signal"] = latest_signal
-        sleeve_result["alpha_results"] = alpha_results
-        sleeve_result["alpha_returns"] = net_returns_df
-        sleeve_result["alpha_gross_returns"] = gross_returns_df
-        sleeve_result["aggregate_weights"] = aggregate_weights
-
-    correlations = net_returns_df.corr()
-    for name, result in alpha_results.items():
-        other_corr = correlations[name].drop(index=name, errors="ignore")
-        avg_corr = other_corr.mean() if not other_corr.empty else np.nan
-        result["avg_correlation"] = avg_corr
-        result["status"] = classify_formulaic_alpha_status(
-            result["metrics"],
-            result["turnover"].sum(),
-            result["cost_drag"],
-            avg_corr,
-        )
-    return sleeve_result, alpha_results, correlations, net_returns_df
-
-
-def build_strategy_summary(result):
-    metrics = result["metrics"]
-    holdings = ", ".join(result["current_holdings"]) if result["current_holdings"] else "Cash"
-    lines = [
-        f"**{result['strategy_name']}** returned {metrics['total_return'] * 100:.2f}% with a CAGR of {metrics['cagr'] * 100:.2f}%.",
-        f"Annualized volatility was {metrics['volatility'] * 100:.2f}%, Sharpe ratio was {metrics['sharpe']:.2f}, and max drawdown was {metrics['max_drawdown'] * 100:.2f}%.",
-        f"Current holdings: **{holdings}**.",
-    ]
-    lines.extend(result["summary_points"])
-    return "\n\n".join(lines)
-
-
-def benchmark_total_return(result):
-    if result["benchmark_equity"].empty:
-        return np.nan
-    return result["benchmark_equity"].iloc[-1] - 1
-
-
 def render_signal_card(signal):
     st.subheader("Latest Daily Signal")
     st.write(
@@ -1549,215 +1138,6 @@ def render_signal_card(signal):
     c4.metric("Rule Match Score", f"{signal['Rule Match Score']:.1f}%")
     c5.metric("Vote", f"{signal['Vote']:+.1f}")
     st.write(f"**Reason:** {signal['Reason']}")
-
-
-def render_top_strategy_summary(result):
-    signal = result["signal"]
-    metrics = result["metrics"]
-    strategy_return = metrics["total_return"] * 100
-    spy_return = benchmark_total_return(result) * 100
-    st.subheader("Selected Strategy Summary")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Selected Strategy", result["strategy_name"])
-    c2.metric("Latest Data Date", signal["Latest Signal Date"])
-    c3.metric("Selected ETF", signal["Selected Asset"])
-    c4.metric("Final Signal", signal["Signal"])
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Rule Match Score", f"{signal['Rule Match Score']:.1f}%")
-    c6.metric("Benchmark", result["benchmark_symbol"])
-    c7.metric("Strategy vs SPY", f"{strategy_return:.2f}% / {spy_return:.2f}%")
-    c8.metric("Sharpe / Max DD", f"{metrics['sharpe']:.2f} / {metrics['max_drawdown'] * 100:.2f}%")
-
-
-def render_combined_strategy_section(combined_signal, strategy_signals):
-    st.subheader("Combined Strategy Signal")
-    render_signal_card(combined_signal)
-    if not strategy_signals:
-        st.warning("No individual strategy signals are available.")
-        return
-    vote_df = pd.DataFrame(strategy_signals).T[
-        ["Latest Signal Date", "Selected Asset", "Signal", "Rule Match Score", "Vote", "Reason"]
-    ]
-    st.dataframe(vote_df, use_container_width=True)
-
-
-def build_all_strategy_signals_table(results):
-    rows = []
-    for strategy_name, result in results.items():
-        if result is None or "signal" not in result:
-            continue
-        signal = result["signal"]
-        rows.append(
-            {
-                "Strategy Name": strategy_name,
-                "Latest Signal": signal["Signal"],
-                "Selected ETF / Asset": signal["Selected Asset"],
-                "Rule Match Score": signal["Rule Match Score"],
-                "Reason": signal["Reason"],
-                "Strategy Return": result["metrics"]["total_return"] * 100,
-                "SPY Return": benchmark_total_return(result) * 100,
-                "Sharpe Ratio": result["metrics"]["sharpe"],
-                "Max Drawdown": result["metrics"]["max_drawdown"] * 100,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def render_combined_signal_section(combined_signal, results):
-    strategy_signals = {
-        strategy_name: result["signal"]
-        for strategy_name, result in results.items()
-        if result is not None and "signal" in result
-    }
-    render_combined_strategy_section(combined_signal, strategy_signals)
-    st.subheader("All Strategy Signals")
-    signal_table = build_all_strategy_signals_table(results)
-    if signal_table.empty:
-        st.warning("No strategy signal table is available.")
-    else:
-        st.dataframe(
-            signal_table.style.format(
-                {
-                    "Rule Match Score": "{:.1f}",
-                    "Strategy Return": "{:.2f}%",
-                    "SPY Return": "{:.2f}%",
-                    "Sharpe Ratio": "{:.2f}",
-                    "Max Drawdown": "{:.2f}%",
-                }
-            ),
-            use_container_width=True,
-        )
-
-
-
-def render_strategy_results(result):
-    if "signal" in result:
-        render_signal_card(result["signal"])
-
-    strategy_return = result["metrics"]["total_return"] * 100
-    spy_return = benchmark_total_return(result) * 100
-    st.write(f"**Backtest performance vs SPY:** {strategy_return:.2f}% vs {spy_return:.2f}%")
-
-    eq_fig = go.Figure()
-    eq_fig.add_trace(
-        go.Scatter(
-            x=result["strategy_equity"].index,
-            y=result["strategy_equity"],
-            name=result["strategy_name"],
-            line=dict(width=2),
-        )
-    )
-    eq_fig.add_trace(
-        go.Scatter(
-            x=result["benchmark_equity"].index,
-            y=result["benchmark_equity"],
-            name=f"{result['benchmark_symbol']} Buy & Hold",
-            line=dict(width=2, dash="dash"),
-        )
-    )
-    eq_fig.update_layout(
-        title=f"{result['strategy_name']} Equity Curve",
-        xaxis_title="Date",
-        yaxis_title="Growth of 1.0",
-        template="plotly_white",
-        legend=dict(x=0.02, y=0.98),
-    )
-    st.plotly_chart(eq_fig, use_container_width=True)
-
-    returns_chart_df = result["monthly_returns"].reset_index()
-    returns_chart_df = returns_chart_df.rename(columns={returns_chart_df.columns[0]: "Date"})
-    returns_fig = px.bar(
-        returns_chart_df,
-        x="Date",
-        y=result["monthly_returns"].columns,
-        barmode="group",
-        title=f"{result['strategy_name']} Monthly Returns",
-    )
-    returns_fig.update_layout(
-        xaxis_title="Date",
-        yaxis_title="Monthly Return (%)",
-        template="plotly_white",
-        margin=dict(l=10, r=10, t=40, b=30),
-        legend_title_text="Series",
-    )
-    st.plotly_chart(returns_fig, use_container_width=True)
-
-    metrics = result["metrics"]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Return", f"{metrics['total_return'] * 100:.2f}%")
-    m2.metric("CAGR", f"{metrics['cagr'] * 100:.2f}%")
-    m3.metric("Annualized Volatility", f"{metrics['volatility'] * 100:.2f}%")
-    m4.metric("Sharpe Ratio", f"{metrics['sharpe']:.2f}")
-    m5, m6 = st.columns(2)
-    m5.metric("Max Drawdown", f"{metrics['max_drawdown'] * 100:.2f}%")
-    m6.metric("Number of Monthly Rebalances", str(metrics["number_rebalances"]))
-
-    if result["transaction_cost"] > 0:
-        st.write(f"Average monthly turnover: {metrics['avg_turnover'] * 100:.2f}%")
-        st.write(f"Transaction cost per trade: {result['transaction_cost'] * 10000:.2f} bps")
-
-    st.divider()
-    st.subheader("Current Holdings")
-    if result["current_holdings"]:
-        current_weights = result["monthly_holdings"][-1]["Holdings_str"]
-        st.write(current_weights)
-    else:
-        st.write("Cash")
-
-    if result["latest_scores"] is not None:
-        st.subheader("Latest Ranking / Signal Table")
-        st.dataframe(result["latest_scores"].style.format(precision=2), use_container_width=True)
-
-    st.subheader("Monthly Holdings Table")
-    if result["monthly_holdings"]:
-        holdings_df = pd.DataFrame(
-            [
-                {"Signal Date": h["Date"].strftime("%Y-%m-%d"), "Holdings": h["Holdings_str"]}
-                for h in result["monthly_holdings"]
-            ]
-        )
-        st.dataframe(holdings_df.tail(24), use_container_width=True)
-
-    st.subheader("Trade Log")
-    st.write(
-        "Signal Date is when the strategy generates the signal. Trade Date is the next trading day when the position becomes active."
-    )
-    if result["trade_log"]:
-        st.dataframe(pd.DataFrame(result["trade_log"]).tail(24), use_container_width=True)
-
-    st.subheader("Monthly Returns Table")
-    st.dataframe(result["monthly_returns"].style.format("{:.2f}%"), use_container_width=True)
-
-    st.subheader("Yearly Returns Table")
-    st.dataframe(result["yearly_returns"].style.format("{:.2f}%"), use_container_width=True)
-
-    st.subheader("Rule-Based Summary")
-    st.markdown(build_strategy_summary(result))
-
-
-def render_strategy_tab(result):
-    render_strategy_results(result)
-
-
-def build_strategy_comparison(results):
-    rows = []
-    for name, result in results.items():
-        if result is None:
-            continue
-        metrics = result["metrics"]
-        rows.append(
-            {
-                "Strategy": name,
-                "Total Return": metrics["total_return"] * 100,
-                "CAGR": metrics["cagr"] * 100,
-                "Volatility": metrics["volatility"] * 100,
-                "Sharpe": metrics["sharpe"],
-                "Max Drawdown": metrics["max_drawdown"] * 100,
-            }
-        )
-    if not rows:
-        return pd.DataFrame()
-    return pd.DataFrame(rows).set_index("Strategy")
 
 
 def calculate_current_drawdown(equity):
@@ -1888,9 +1268,16 @@ def get_strategy_regime_fit(strategy_name, regime_name):
     return SCORE_LABELS.get(label, 0.6)
 
 
-def build_regime_aware_strategy_allocation(results, regime, max_strategy_weight=0.25):
+def calculate_dynamic_strategy_weights(
+    strategy_results,
+    current_regime,
+    regime_fit_mapping=None,
+    max_strategy_weight=0.25,
+    min_strategy_weight=0.0,
+):
     rows = []
-    for strategy_name, result in results.items():
+    equal_weight = 1 / max(1, len(strategy_results))
+    for strategy_name, result in strategy_results.items():
         metrics = result["metrics"]
         recent_returns = result["strategy_returns"].tail(63)
         recent_performance = (1 + recent_returns).prod() - 1 if not recent_returns.empty else np.nan
@@ -1901,22 +1288,33 @@ def build_regime_aware_strategy_allocation(results, regime, max_strategy_weight=
         drawdown_penalty = min(1.0, abs(current_drawdown) / 0.20) if pd.notna(current_drawdown) and current_drawdown < 0 else 0.0
         risk_status = classify_strategy_status(result)
         risk_limit_penalty = 0.40 if risk_status == "Pause" else 0.25 if risk_status == "Reduce" else 0.10 if risk_status == "Watch" else 0.0
-        signal = result.get("signal", {}).get("Signal", "HOLD")
+        signal_info = result.get("signal", {})
+        signal = signal_info.get("Signal", "HOLD")
+        selected_asset = signal_info.get("Selected Asset", "Cash")
+        signal_validity = 0.0 if signal in ["CASH", "RISK-OFF", "SELL"] else 1.0 if signal == "BUY" else 0.6
         signal_penalty = 0.10 if signal in ["CASH", "RISK-OFF", "SELL"] else 0.0
-        regime_fit = get_strategy_regime_fit(strategy_name, regime["regime_name"])
+        regime_fit = get_strategy_regime_fit(strategy_name, current_regime["regime_name"])
         final_score = (
             0.40 * regime_fit
             + 0.30 * recent_score
             + 0.20 * risk_adjusted_score
+            + 0.10 * signal_validity
             - 0.10 * drawdown_penalty
             - risk_limit_penalty
             - signal_penalty
         )
         final_score = max(0.0, final_score)
+        explanation = (
+            f"{strategy_name} weight reflects {current_regime['regime_name']} regime fit ({regime_fit:.2f}), "
+            f"63-day performance score ({recent_score:.2f}), Sharpe score ({risk_adjusted_score:.2f}), "
+            f"drawdown penalty ({drawdown_penalty:.2f}), risk status ({risk_status}), and current signal ({signal})."
+        )
         rows.append(
             {
                 "Strategy": strategy_name,
-                "Base Weight": 1 / max(1, len(results)),
+                "Selected Asset": selected_asset,
+                "Signal": signal,
+                "Base Weight": equal_weight,
                 "Regime Fit Score": regime_fit,
                 "Recent Performance Score": recent_score,
                 "Risk Adjusted Score": risk_adjusted_score,
@@ -1924,20 +1322,40 @@ def build_regime_aware_strategy_allocation(results, regime, max_strategy_weight=
                 "Risk Limit Penalty": risk_limit_penalty + signal_penalty,
                 "Final Score": final_score,
                 "Risk Status": risk_status,
-                "Reason": f"{strategy_name} receives a {regime_fit:.2f} regime-fit score in {regime['regime_name']}; recent performance and risk penalties adjust the final weight.",
+                "Explanation": explanation,
+                "Reason": explanation,
             }
         )
     table = pd.DataFrame(rows)
     if table.empty or table["Final Score"].sum() <= 0:
-        table["Final Allocation"] = 1 / max(1, len(table))
+        table["Final Strategy Weight"] = 1 / max(1, len(table))
+        table["Final Allocation"] = table["Final Strategy Weight"]
+        table["Weight Change vs Equal Weight"] = 0.0
+        table["Allocation Change"] = "Neutral"
         return table
     raw_weights = table["Final Score"] / table["Final Score"].sum()
-    capped = raw_weights.clip(upper=max_strategy_weight)
-    if capped.sum() > 0:
-        table["Final Allocation"] = capped / capped.sum()
-    else:
-        table["Final Allocation"] = 1 / max(1, len(table))
+    constrained = raw_weights.clip(lower=min_strategy_weight, upper=max_strategy_weight)
+    if constrained.sum() <= 0:
+        constrained = pd.Series(1 / len(table), index=table.index)
+    table["Final Strategy Weight"] = constrained / constrained.sum()
+    table["Final Allocation"] = table["Final Strategy Weight"]
+    table["Weight Change vs Equal Weight"] = table["Final Strategy Weight"] - table["Base Weight"]
+    table["Allocation Change"] = np.where(
+        table["Weight Change vs Equal Weight"] > 0.002,
+        "Increased",
+        np.where(table["Weight Change vs Equal Weight"] < -0.002, "Decreased", "Neutral"),
+    )
     return table
+
+
+def build_regime_aware_strategy_allocation(results, regime, max_strategy_weight=0.25):
+    return calculate_dynamic_strategy_weights(
+        results,
+        regime,
+        STRATEGY_REGIME_SUITABILITY,
+        max_strategy_weight=max_strategy_weight,
+        min_strategy_weight=0.0,
+    )
 
 
 def adjust_asset_class_targets(regime_name, etf_weight, stock_weight, cash_weight, enable_cash=True, risk_off_cash_min=0.15):
@@ -1973,10 +1391,12 @@ def get_current_holdings_text(result):
     return "N/A"
 
 
-def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL):
+def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None):
     correlations = calculate_strategy_correlations(results)
     risk_contributions = calculate_strategy_risk_contributions(results)
     allocations, statuses = build_strategy_allocations(results)
+    if strategy_allocation is not None and not strategy_allocation.empty:
+        allocations = strategy_allocation.set_index("Strategy")["Final Strategy Weight"]
     rows = []
     for strategy_name, result in results.items():
         if result is None:
@@ -2010,33 +1430,6 @@ def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL):
                 "Risk Status": status,
                 "Recommended Action": action,
                 "Reason": build_risk_explanation(result, status, max_corr, risk_contribution),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def build_formulaic_alpha_table(alpha_results, correlations):
-    rows = []
-    for name, result in alpha_results.items():
-        metrics = result["metrics"]
-        gross_metrics = result["gross_metrics"]
-        avg_corr = result.get("avg_correlation", np.nan)
-        rows.append(
-            {
-                "Alpha name": name,
-                "Category": result["category"],
-                "Current signal": result["current_signal"],
-                "Selected ETFs": ", ".join(result["selected_etfs"]),
-                "Current allocation": 1 / max(1, len(alpha_results)),
-                "Gross return": gross_metrics["total_return"],
-                "Net return": metrics["total_return"],
-                "Sharpe ratio": metrics["sharpe"],
-                "Max drawdown": metrics["max_drawdown"],
-                "Current drawdown": metrics["current_drawdown"],
-                "Turnover": result["turnover"].sum(),
-                "Transaction cost drag": result["cost_drag"],
-                "Average correlation": avg_corr,
-                "Status": result.get("status", "N/A"),
             }
         )
     return pd.DataFrame(rows)
@@ -2123,8 +1516,31 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     return raw.sort_values("Stock Score", ascending=False).head(top_n)
 
 
-def build_position_allocation(strategy_results, strategy_allocation_table, stock_selection, asset_targets, initial_capital, max_position_weight=0.10):
-    position_weights = {}
+def parse_selected_assets(selected_asset):
+    assets = [asset.strip() for asset in str(selected_asset).split(",")]
+    return [asset for asset in assets if asset and asset not in ["Cash", "N/A", "None"]]
+
+
+def get_asset_type(ticker):
+    if ticker == "Cash":
+        return "Cash"
+    if ticker in get_all_stock_symbols():
+        return "Stock"
+    return "ETF"
+
+
+def build_position_allocation(
+    strategy_results,
+    strategy_allocation_table,
+    stock_selection,
+    asset_targets,
+    initial_capital,
+    max_position_weight=0.10,
+    max_sector_exposure=0.35,
+):
+    etf_category_map = get_etf_category_map()
+    stock_category_map = get_stock_category_map()
+    position_rows = []
     etf_budget = asset_targets.get("ETFs", 0.0)
     stock_budget = asset_targets.get("Stocks", 0.0)
     cash_budget = asset_targets.get("Cash / SHY / BIL", 0.0)
@@ -2135,43 +1551,135 @@ def build_position_allocation(strategy_results, strategy_allocation_table, stock
             continue
         sleeve_weight = etf_budget * row["Final Allocation"]
         signal = strategy_results[strategy].get("signal", {})
-        selected = [asset.strip() for asset in str(signal.get("Selected Asset", "")).split(",")]
-        selected = [asset for asset in selected if asset and asset not in ["Cash", "N/A"]]
+        selected = parse_selected_assets(signal.get("Selected Asset", ""))
         if not selected:
-            selected = ["SHY"]
+            selected = ["Cash"] if signal.get("Signal") in ["CASH", "SELL"] else ["SHY"]
         for asset in selected:
-            position_weights[asset] = position_weights.get(asset, 0.0) + sleeve_weight / len(selected)
+            asset_type = get_asset_type(asset)
+            category = "Cash" if asset == "Cash" else etf_category_map.get(asset, stock_category_map.get(asset, "Other"))
+            position_rows.append(
+                {
+                    "Ticker": asset,
+                    "Asset Type": asset_type,
+                    "Source": strategy,
+                    "Sector/Category": category,
+                    "Portfolio Weight": sleeve_weight / len(selected),
+                    "Signal": signal.get("Signal", "N/A"),
+                    "Reason": signal.get("Reason", row.get("Reason", "")),
+                }
+            )
 
     if not stock_selection.empty and stock_budget > 0:
-        stock_weight = stock_budget / len(stock_selection)
-        for ticker in stock_selection["Ticker"]:
-            position_weights[ticker] = position_weights.get(ticker, 0.0) + stock_weight
+        positive_scores = stock_selection["Stock Score"].clip(lower=0)
+        if positive_scores.sum() <= 0:
+            score_weights = pd.Series(1 / len(stock_selection), index=stock_selection.index)
+        else:
+            score_weights = positive_scores / positive_scores.sum()
+        for idx, row in stock_selection.iterrows():
+            ticker = row["Ticker"]
+            position_rows.append(
+                {
+                    "Ticker": ticker,
+                    "Asset Type": "Stock",
+                    "Source": "Stock Selector",
+                    "Sector/Category": row.get("Category", "Other"),
+                    "Portfolio Weight": stock_budget * score_weights.loc[idx],
+                    "Signal": "BUY",
+                    "Reason": row.get("Reason", "Selected by stock ranking score."),
+                }
+            )
 
     if cash_budget > 0:
-        cash_asset = "BIL" if "BIL" in get_all_etf_symbols() else "SHY"
-        position_weights[cash_asset] = position_weights.get(cash_asset, 0.0) + cash_budget
+        position_rows.append(
+            {
+                "Ticker": "Cash",
+                "Asset Type": "Cash",
+                "Source": "Risk Manager",
+                "Sector/Category": "Cash",
+                "Portfolio Weight": cash_budget,
+                "Signal": "CASH",
+                "Reason": "Required cash buffer from asset allocation and risk controls.",
+            }
+        )
 
-    capped = {}
+    if not position_rows:
+        return pd.DataFrame(columns=["Ticker", "Asset Type", "Source", "Sector/Category", "Portfolio Weight", "Dollar Allocation", "Signal", "Reason"])
+
+    raw = pd.DataFrame(position_rows)
+    grouped = (
+        raw.groupby("Ticker", as_index=False)
+        .agg(
+            {
+                "Asset Type": "first",
+                "Source": lambda values: ", ".join(dict.fromkeys(values)),
+                "Sector/Category": "first",
+                "Portfolio Weight": "sum",
+                "Signal": lambda values: ", ".join(dict.fromkeys(values)),
+                "Reason": lambda values: " | ".join(dict.fromkeys(values)),
+            }
+        )
+    )
+
+    capped_weights = {}
     overflow = 0.0
-    for asset, weight in position_weights.items():
-        if weight > max_position_weight:
-            capped[asset] = max_position_weight
+    for _, row in grouped.iterrows():
+        asset = row["Ticker"]
+        weight = row["Portfolio Weight"]
+        if row["Asset Type"] != "Cash" and weight > max_position_weight:
+            capped_weights[asset] = max_position_weight
             overflow += weight - max_position_weight
         else:
-            capped[asset] = weight
+            capped_weights[asset] = weight
+    grouped["Portfolio Weight"] = grouped["Ticker"].map(capped_weights)
+
+    sector_excess = 0.0
+    sector_weights = grouped[grouped["Asset Type"] != "Cash"].groupby("Sector/Category")["Portfolio Weight"].sum()
+    for category, weight in sector_weights.items():
+        if weight <= max_sector_exposure:
+            continue
+        scale = max_sector_exposure / weight
+        mask = (grouped["Sector/Category"] == category) & (grouped["Asset Type"] != "Cash")
+        before = grouped.loc[mask, "Portfolio Weight"].sum()
+        grouped.loc[mask, "Portfolio Weight"] *= scale
+        sector_excess += before - grouped.loc[mask, "Portfolio Weight"].sum()
+    overflow += sector_excess
+
     if overflow > 0:
-        capped["Cash"] = capped.get("Cash", 0.0) + overflow
-    total = sum(capped.values())
+        cash_mask = grouped["Ticker"] == "Cash"
+        if cash_mask.any():
+            grouped.loc[cash_mask, "Portfolio Weight"] += overflow
+            grouped.loc[cash_mask, "Reason"] = grouped.loc[cash_mask, "Reason"] + " Excess allocation moved to cash after position/sector caps."
+        else:
+            grouped = pd.concat(
+                [
+                    grouped,
+                    pd.DataFrame(
+                        [
+                            {
+                                "Ticker": "Cash",
+                                "Asset Type": "Cash",
+                                "Source": "Risk Manager",
+                                "Sector/Category": "Cash",
+                                "Portfolio Weight": overflow,
+                                "Signal": "CASH",
+                                "Reason": "Excess allocation moved to cash after position/sector caps.",
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+
+    total = grouped["Portfolio Weight"].sum()
     if total > 0:
-        capped = {asset: weight / total for asset, weight in capped.items()}
-    rows = [
-        {"Position": asset, "Weight": weight, "Dollar Allocation": weight * initial_capital}
-        for asset, weight in sorted(capped.items(), key=lambda item: item[1], reverse=True)
-    ]
-    return pd.DataFrame(rows)
+        grouped["Portfolio Weight"] = grouped["Portfolio Weight"] / total
+    grouped["Dollar Allocation"] = grouped["Portfolio Weight"] * initial_capital
+    return grouped.sort_values("Portfolio Weight", ascending=False)[
+        ["Ticker", "Asset Type", "Source", "Sector/Category", "Portfolio Weight", "Dollar Allocation", "Signal", "Reason"]
+    ].reset_index(drop=True)
 
 
-def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL):
+def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL, strategy_weights=None):
     net_returns = {}
     gross_returns = {}
     for strategy_name, result in results.items():
@@ -2188,10 +1696,15 @@ def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL):
     if net_df.empty:
         return pd.DataFrame(), {}
 
-    allocations, statuses = build_strategy_allocations({name: results[name] for name in net_df.columns})
-    weights = allocations.reindex(net_df.columns).fillna(0.0)
+    _, statuses = build_strategy_allocations({name: results[name] for name in net_df.columns})
+    if strategy_weights is None:
+        weights = pd.Series(1 / len(net_df.columns), index=net_df.columns)
+    else:
+        weights = strategy_weights.reindex(net_df.columns).fillna(0.0)
     if weights.sum() <= 0:
         weights = pd.Series(1 / len(net_df.columns), index=net_df.columns)
+    else:
+        weights = weights / weights.sum()
     portfolio_net_returns = net_df.mul(weights, axis=1).sum(axis=1)
     portfolio_gross_returns = gross_df.mul(weights, axis=1).sum(axis=1)
     portfolio_net_value = initial_capital * (1 + portfolio_net_returns).cumprod()
@@ -2246,77 +1759,6 @@ def build_portfolio_recommendation(metrics):
     return "Keep current allocation: portfolio risk is within MVP limits."
 
 
-def render_clean_portfolio_overview(results, portfolio_returns, portfolio_metrics, initial_capital=INITIAL_CAPITAL):
-    st.header("Portfolio Overview")
-    if portfolio_returns.empty:
-        st.warning("Portfolio backtest is unavailable for the selected settings.")
-        return
-    st.info(
-        "This Portfolio Overview is a hypothetical / simulated multi-strategy portfolio tracker, not a live brokerage account. "
-        "Each strategy is treated as a separate sleeve. Portfolio PnL is calculated from the weighted combination of strategy "
-        "net returns after transaction costs."
-    )
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Initial Capital", f"${initial_capital:,.0f}")
-    c2.metric("Portfolio Value", f"${portfolio_metrics['portfolio_value']:,.0f}")
-    c3.metric("Total PnL", f"${portfolio_metrics['total_pnl']:,.0f}")
-    c4.metric("Net Return After Costs", f"{portfolio_metrics['net_return'] * 100:.2f}%")
-    c5, c6, c7, c8 = st.columns(4)
-    c5.metric("Gross Return", f"{portfolio_metrics['gross_return'] * 100:.2f}%")
-    c6.metric("Portfolio Sharpe", f"{portfolio_metrics['sharpe']:.2f}")
-    c7.metric("Portfolio Volatility", f"{portfolio_metrics['volatility'] * 100:.2f}%")
-    c8.metric("Max Drawdown", f"{portfolio_metrics['max_drawdown'] * 100:.2f}%")
-    c9, c10, c11, c12 = st.columns(4)
-    c9.metric("Current Drawdown", f"{portfolio_metrics['current_drawdown'] * 100:.2f}%")
-    c10.metric("VaR 95%", f"{portfolio_metrics['var_95'] * 100:.2f}%")
-    c11.metric("Expected Shortfall 95%", f"{portfolio_metrics['expected_shortfall_95'] * 100:.2f}%")
-    c12.metric("Cost Drag", f"{portfolio_metrics['transaction_cost_drag'] * 100:.2f}%")
-    c13, c14, c15 = st.columns(3)
-    c13.metric("Total Turnover", f"{portfolio_metrics['total_turnover']:.2f}x")
-    c14.metric("Active Strategies", str(portfolio_metrics["active_strategies"]))
-    c15.metric("Watch / Reduce / Pause", str(portfolio_metrics["warning_strategies"]))
-    st.success(f"Current overall portfolio recommendation: {portfolio_metrics['recommendation']}")
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=portfolio_returns.index, y=portfolio_returns["Net Value"], name="Net Portfolio", line=dict(width=2)))
-    fig.update_layout(title="Portfolio Equity Curve", xaxis_title="Date", yaxis_title="Portfolio Value ($)", template="plotly_white")
-    st.plotly_chart(fig, use_container_width=True)
-
-    gross_net_fig = go.Figure()
-    gross_net_fig.add_trace(go.Scatter(x=portfolio_returns.index, y=portfolio_returns["Gross Value"], name="Gross", line=dict(width=2, dash="dash")))
-    gross_net_fig.add_trace(go.Scatter(x=portfolio_returns.index, y=portfolio_returns["Net Value"], name="Net", line=dict(width=2)))
-    gross_net_fig.update_layout(title="Gross vs Net Performance", xaxis_title="Date", yaxis_title="Portfolio Value ($)", template="plotly_white")
-    st.plotly_chart(gross_net_fig, use_container_width=True)
-
-    drawdown = portfolio_returns["Net Value"] / portfolio_returns["Net Value"].cummax() - 1
-    dd_fig = px.area(x=drawdown.index, y=drawdown, title="Portfolio Drawdown")
-    dd_fig.update_layout(xaxis_title="Date", yaxis_title="Drawdown", template="plotly_white")
-    st.plotly_chart(dd_fig, use_container_width=True)
-
-    contribution_rows = []
-    allocation_rows = []
-    risk_contributions = calculate_strategy_risk_contributions(results)
-    allocations = portfolio_metrics.get("allocations", pd.Series(1 / max(1, len(results)), index=results.keys()))
-    for strategy_name, result in results.items():
-        if result is None:
-            continue
-        allocation = allocations.get(strategy_name, 0.0)
-        allocation_rows.append({"Strategy": strategy_name, "Allocation": allocation, "Allocation $": allocation * initial_capital})
-        contribution_rows.append(
-            {
-                "Strategy": strategy_name,
-                "PnL Contribution": result["metrics"]["net_return"] * initial_capital * allocation,
-                "Risk Contribution": risk_contributions.get(strategy_name, np.nan),
-            }
-        )
-    allocation_df = pd.DataFrame(allocation_rows)
-    st.plotly_chart(px.bar(allocation_df, x="Strategy", y="Allocation $", title="Strategy Allocation"), use_container_width=True)
-    contribution_df = pd.DataFrame(contribution_rows).sort_values("PnL Contribution", ascending=False)
-    st.plotly_chart(px.bar(contribution_df, x="Strategy", y="PnL Contribution", title="Strategy Contribution to Total PnL"), use_container_width=True)
-    st.plotly_chart(px.bar(contribution_df, x="Strategy", y="Risk Contribution", title="Strategy Contribution to Risk"), use_container_width=True)
-
-
 def render_regime_aware_portfolio_overview(
     results,
     portfolio_returns,
@@ -2334,9 +1776,10 @@ def render_regime_aware_portfolio_overview(
     c3.metric("Current Regime", regime["regime_name"])
     c4.metric("Regime Confidence", f"{regime['confidence']:.0%}")
     c5, c6, c7, c8 = st.columns(4)
+    final_cash_weight = position_allocation.loc[position_allocation["Asset Type"] == "Cash", "Portfolio Weight"].sum() if not position_allocation.empty else asset_targets.get("Cash / SHY / BIL", 0)
     c5.metric("Portfolio Sharpe", f"{portfolio_metrics.get('sharpe', np.nan):.2f}")
     c6.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
-    c7.metric("Cash Allocation", f"{asset_targets.get('Cash / SHY / BIL', 0) * 100:.1f}%")
+    c7.metric("Final Cash Allocation", f"{final_cash_weight * 100:.1f}%")
     c8.metric("Risk Status", build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets)["Status"])
     st.info(regime["regime_explanation"])
     st.success(f"Portfolio recommendation: {portfolio_metrics.get('recommendation', 'Keep current allocation')}")
@@ -2350,15 +1793,26 @@ def render_regime_aware_portfolio_overview(
         st.dataframe(asset_df.style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
         st.plotly_chart(px.pie(asset_df, names="Sleeve", values="Weight", title="Aggregate Portfolio Allocation"), use_container_width=True)
     with right:
-        st.subheader("Current Top Holdings")
-        st.dataframe(position_allocation.head(12).style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
+        st.subheader("Top 10 Holdings")
+        st.dataframe(
+            position_allocation.head(10).style.format({"Portfolio Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}),
+            use_container_width=True,
+        )
 
     st.subheader("Strategy Allocation")
     st.dataframe(
-        strategy_allocation[["Strategy", "Final Allocation", "Final Score", "Regime Fit Score", "Reason"]]
+        strategy_allocation[["Strategy", "Selected Asset", "Signal", "Final Allocation", "Final Score", "Regime Fit Score", "Allocation Change", "Reason"]]
         .style.format({"Final Allocation": "{:.2%}", "Final Score": "{:.2f}", "Regime Fit Score": "{:.2f}"}),
         use_container_width=True,
     )
+
+    st.subheader("Final Portfolio Holdings")
+    st.caption("These are final position-level holdings after aggregating strategy signals, stock selector weights, cash allocation, and position/sector caps.")
+    st.dataframe(
+        position_allocation.style.format({"Portfolio Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}),
+        use_container_width=True,
+    )
+    st.metric("Total Dollar Allocation", f"${position_allocation['Dollar Allocation'].sum():,.0f}" if not position_allocation.empty else "$0")
 
     if not portfolio_returns.empty:
         st.plotly_chart(px.line(portfolio_returns, x=portfolio_returns.index, y="Net Value", title="Portfolio Net Equity Curve"), use_container_width=True)
@@ -2401,6 +1855,7 @@ def render_market_regime_tab(close, regime):
 
 def render_strategy_allocation_tab(strategy_allocation):
     st.header("Strategy Allocation")
+    st.write("Strategy weights are dynamic. They are based on regime fit, recent performance, Sharpe, drawdown, risk status, and signal validity. Equal weight is shown only as a comparison baseline.")
     st.dataframe(
         strategy_allocation.style.format(
             {
@@ -2412,6 +1867,8 @@ def render_strategy_allocation_tab(strategy_allocation):
                 "Risk Limit Penalty": "{:.2f}",
                 "Final Score": "{:.2f}",
                 "Final Allocation": "{:.2%}",
+                "Final Strategy Weight": "{:.2%}",
+                "Weight Change vs Equal Weight": "{:+.2%}",
             }
         ),
         use_container_width=True,
@@ -2429,6 +1886,8 @@ def render_stock_selection_tab(stock_selection):
         "Ticker",
         "Category",
         "Stock Score",
+        "Assigned Portfolio Weight",
+        "Dollar Allocation",
         "Current Price",
         "20D Return",
         "60D Return",
@@ -2439,10 +1898,13 @@ def render_stock_selection_tab(stock_selection):
         "Trend Status",
         "Reason",
     ]
+    display_cols = [col for col in display_cols if col in stock_selection.columns]
     st.dataframe(
         stock_selection[display_cols].style.format(
             {
                 "Stock Score": "{:.2f}",
+                "Assigned Portfolio Weight": "{:.2%}",
+                "Dollar Allocation": "${:,.0f}",
                 "Current Price": "${:,.2f}",
                 "20D Return": "{:.2%}",
                 "60D Return": "{:.2%}",
@@ -2463,8 +1925,17 @@ def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_ta
         warnings.append("Severe portfolio drawdown breach.")
     elif portfolio_metrics.get("max_drawdown", 0) < RISK_LIMITS["max_drawdown_warning"]:
         warnings.append("Portfolio drawdown warning.")
-    if not position_allocation.empty and position_allocation["Weight"].max() > max_position_weight:
+    non_cash_positions = position_allocation[position_allocation["Asset Type"] != "Cash"] if not position_allocation.empty else pd.DataFrame()
+    if not non_cash_positions.empty and non_cash_positions["Portfolio Weight"].max() > max_position_weight:
         warnings.append("Top holding exceeds max position weight.")
+    if not position_allocation.empty:
+        sector_exposure = (
+            position_allocation[position_allocation["Asset Type"] != "Cash"]
+            .groupby("Sector/Category")["Portfolio Weight"]
+            .sum()
+        )
+        if not sector_exposure.empty and sector_exposure.max() > max_sector_exposure:
+            warnings.append("Sector/category exposure exceeds the configured maximum.")
     if asset_targets.get("Cash / SHY / BIL", 0) < 0.15 and portfolio_metrics.get("recommendation", "").lower().startswith("hedge"):
         warnings.append("Cash allocation may be too low for the detected risk level.")
     status = "Breach" if any("breach" in warning.lower() for warning in warnings) else "Watch" if warnings else "OK"
@@ -2473,11 +1944,12 @@ def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_ta
 
 def render_risk_dashboard(results, close, portfolio_metrics, position_allocation, asset_targets, max_position_weight, max_sector_exposure):
     st.header("Risk Dashboard")
+    final_cash_weight = position_allocation.loc[position_allocation["Asset Type"] == "Cash", "Portfolio Weight"].sum() if not position_allocation.empty else asset_targets.get("Cash / SHY / BIL", 0)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Portfolio Volatility", f"{portfolio_metrics.get('volatility', np.nan) * 100:.2f}%")
     c2.metric("Portfolio Sharpe", f"{portfolio_metrics.get('sharpe', np.nan):.2f}")
     c3.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
-    c4.metric("Cash Allocation", f"{asset_targets.get('Cash / SHY / BIL', 0) * 100:.1f}%")
+    c4.metric("Final Cash Allocation", f"{final_cash_weight * 100:.1f}%")
     risk_status = build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets, max_position_weight, max_sector_exposure)
     if risk_status["Status"] == "OK":
         st.success("Risk limit status: OK")
@@ -2511,13 +1983,26 @@ def render_risk_dashboard(results, close, portfolio_metrics, position_allocation
             use_container_width=True,
             key="risk_dashboard_strategy_risk_contribution",
         )
-    st.subheader("Position Concentration")
-    st.dataframe(position_allocation.style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
+    st.subheader("Concentration Risk")
+    if not position_allocation.empty:
+        top_position = position_allocation.iloc[0]
+        st.metric("Largest Position", f"{top_position['Ticker']} / {top_position['Portfolio Weight']:.2%}")
+        sector_exposure = (
+            position_allocation[position_allocation["Asset Type"] != "Cash"]
+            .groupby("Sector/Category")["Portfolio Weight"]
+            .sum()
+            .sort_values(ascending=False)
+        )
+        st.plotly_chart(px.bar(x=sector_exposure.index, y=sector_exposure.values, title="Sector / Category Exposure"), use_container_width=True)
+        st.dataframe(
+            position_allocation.style.format({"Portfolio Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}),
+            use_container_width=True,
+        )
 
 
-def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL):
+def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None):
     st.header("Strategies Live Monitoring")
-    table = build_strategy_monitoring_table(results, initial_capital=initial_capital)
+    table = build_strategy_monitoring_table(results, initial_capital=initial_capital, strategy_allocation=strategy_allocation)
     if table.empty:
         st.warning("No strategy results are available.")
         return
@@ -2584,27 +2069,6 @@ def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL):
     selected_row = table[table["Strategy"] == selected_strategy].iloc[0]
     st.write(f"Risk status: **{selected_row['Risk Status']}**. Recommended action: **{selected_row['Recommended Action']}**.")
     st.write(selected_row["Reason"])
-
-
-def render_strategy_correlation(results):
-    st.header("Strategy Correlation")
-    returns_df = pd.DataFrame(
-        {strategy_name: result["strategy_returns"] for strategy_name, result in results.items() if result is not None}
-    ).dropna(how="all")
-    if returns_df.empty or returns_df.shape[1] < 2:
-        st.warning("Not enough strategy return data for correlation analysis.")
-        return
-    corr = returns_df.corr()
-    st.dataframe(corr.style.format("{:.2f}"), use_container_width=True)
-    st.plotly_chart(
-        px.imshow(corr, text_auto=".2f", title="Strategy Correlation Heatmap", color_continuous_scale="RdBu_r", zmin=-1, zmax=1),
-        use_container_width=True,
-    )
-    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool)).stack()
-    avg_corr = upper.mean()
-    st.metric("Average Pairwise Correlation", f"{avg_corr:.2f}")
-    if avg_corr > 0.70 or (upper.abs() > 0.85).any():
-        st.warning("Correlation warning: several strategies may be moving together. Consider reducing overlapping strategy weights.")
 
 
 def build_market_monitoring_table(close, symbols):
@@ -2758,39 +2222,6 @@ def build_regime_history(close):
     return pd.DataFrame(rows).set_index("Date") if rows else pd.DataFrame()
 
 
-def classify_market_regime(close):
-    regime = detect_market_regime(close)
-    return regime["regime_name"], regime["regime_explanation"]
-
-
-def render_market_monitoring(close):
-    st.header("Market Monitoring")
-    regime, regime_reason = classify_market_regime(close)
-    st.metric("Simple Market Regime", regime)
-    st.write(regime_reason)
-    st.caption("Hourly refresh does not mean intraday trading. Official signals and backtests use daily bars.")
-
-    for group_name, symbols in MARKET_GROUPS.items():
-        st.subheader(group_name)
-        group_table = build_market_monitoring_table(close, symbols)
-        if group_table.empty:
-            st.write("No selected data is available for this group.")
-            continue
-        st.dataframe(
-            group_table.style.format(
-                {
-                    "Latest Price": "${:,.2f}",
-                    "1D Return": "{:.2%}",
-                    "5D Return": "{:.2%}",
-                    "20D Return": "{:.2%}",
-                    "60D Return": "{:.2%}",
-                    "20D Realized Volatility": "{:.2%}",
-                }
-            ),
-            use_container_width=True,
-        )
-
-
 def build_factor_returns(close):
     factor_returns = {}
     returns = close.pct_change(fill_method=None).dropna()
@@ -2824,132 +2255,42 @@ def estimate_factor_exposures(results, close):
     return pd.DataFrame(rows).set_index("Strategy")
 
 
-def render_risk_factors(results, close, formulaic_sleeve_result=None, formulaic_alpha_results=None, formulaic_alpha_correlations=None):
-    st.header("Risk Factors")
-    correlations = calculate_strategy_correlations(results)
-    if not correlations.empty:
-        st.subheader("Strategy Correlation Heatmap")
-        st.plotly_chart(
-            px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Heatmap", color_continuous_scale="RdBu_r", zmin=-1, zmax=1),
-            use_container_width=True,
-            key="risk_factors_strategy_correlation_heatmap",
-        )
-        upper = correlations.where(np.triu(np.ones(correlations.shape), k=1).astype(bool)).stack()
-        st.metric("Average Pairwise Strategy Correlation", f"{upper.mean():.2f}" if not upper.empty else "N/A")
-        if not upper.empty and (upper.abs() > 0.80).any():
-            st.warning("Factor concentration warning: at least one pair of strategy sleeves has correlation above 0.80.")
+def render_strategy_results(result):
+    if "signal" in result:
+        render_signal_card(result["signal"])
 
-    exposures = estimate_factor_exposures(results, close)
-    if exposures.empty:
-        st.warning("Not enough data for factor exposure regression.")
-    else:
-        st.subheader("Strategy-Level Factor Exposure Table")
-        st.dataframe(exposures.style.format("{:.2f}"), use_container_width=True)
-        portfolio_exposure = exposures.mean().sort_values()
-        st.plotly_chart(
-            px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"),
-            use_container_width=True,
-            key="risk_factors_portfolio_factor_exposure",
-        )
-        if portfolio_exposure.abs().max() > 0.80:
-            st.warning("Factor concentration warning: one factor exposure is large relative to the rest.")
+    strategy_return = result["metrics"]["net_return"] * 100
+    benchmark_return = result["benchmark_equity"].iloc[-1] * 100 - 100 if not result["benchmark_equity"].empty else np.nan
+    st.write(f"**Backtest performance vs benchmark:** {strategy_return:.2f}% vs {benchmark_return:.2f}%")
 
-    risk_contributions = calculate_strategy_risk_contributions(results).sort_values(ascending=False)
-    if not risk_contributions.empty:
-        st.subheader("Risk Contribution by Strategy")
-        st.plotly_chart(
-            px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Strategy Risk Contribution"),
-            use_container_width=True,
-            key="risk_factors_strategy_risk_contribution",
-        )
-        st.dataframe(risk_contributions.to_frame("Risk Contribution").style.format("{:.2%}"), use_container_width=True)
-
-    if formulaic_sleeve_result is not None and formulaic_alpha_results:
-        with st.expander("Optional Formulaic Alpha Lab"):
-            render_formulaic_alpha_lab(formulaic_sleeve_result, formulaic_alpha_results, formulaic_alpha_correlations)
-
-
-def render_formulaic_alpha_lab(sleeve_result, alpha_results, correlations):
-    st.header("Formulaic Alpha Lab")
-    st.write(
-        "Research section for 10 simplified WorldQuant 101-inspired daily ETF alphas. "
-        "The main portfolio sees these models only as one sleeve: Formulaic Alpha Sleeve."
-    )
-    if sleeve_result is None or not alpha_results:
-        st.warning("Formulaic alpha results are unavailable for the selected data.")
-        return
-
-    sleeve_metrics = sleeve_result["metrics"]
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sleeve Gross Return", f"{sleeve_metrics['gross_return'] * 100:.2f}%")
-    c2.metric("Sleeve Net Return", f"{sleeve_metrics['net_return'] * 100:.2f}%")
-    c3.metric("Sleeve Sharpe", f"{sleeve_metrics['sharpe']:.2f}")
-    c4.metric("Sleeve Cost Drag", f"{sleeve_metrics['transaction_cost_drag'] * 100:.2f}%")
-    c5, c6, c7 = st.columns(3)
-    c5.metric("Sleeve Max Drawdown", f"{sleeve_metrics['max_drawdown'] * 100:.2f}%")
-    c6.metric("Sleeve Current Drawdown", f"{calculate_current_drawdown(sleeve_result['strategy_equity']) * 100:.2f}%")
-    c7.metric("Sleeve Turnover", f"{sleeve_metrics['total_turnover']:.2f}x")
-
-    alpha_table = build_formulaic_alpha_table(alpha_results, correlations)
-    st.subheader("10 Alpha Monitoring Table")
-    st.dataframe(
-        alpha_table.style.format(
-            {
-                "Current allocation": "{:.2%}",
-                "Gross return": "{:.2%}",
-                "Net return": "{:.2%}",
-                "Sharpe ratio": "{:.2f}",
-                "Max drawdown": "{:.2%}",
-                "Current drawdown": "{:.2%}",
-                "Turnover": "{:.2f}",
-                "Transaction cost drag": "{:.2%}",
-                "Average correlation": "{:.2f}",
-            }
-        ),
-        use_container_width=True,
-    )
-
-    if not correlations.empty:
-        st.subheader("Alpha Correlation Heatmap")
-        st.plotly_chart(
-            px.imshow(correlations, text_auto=".2f", title="Formulaic Alpha Correlation", color_continuous_scale="RdBu_r", zmin=-1, zmax=1),
-            use_container_width=True,
-        )
-
-    contribution_df = pd.DataFrame(
-        [
-            {
-                "Alpha": name,
-                "Sleeve PnL Contribution": result["metrics"]["total_return"] * INITIAL_CAPITAL / max(1, len(alpha_results)),
-            }
-            for name, result in alpha_results.items()
-        ]
-    ).sort_values("Sleeve PnL Contribution", ascending=False)
-    st.subheader("Alpha Contribution to Sleeve PnL")
-    st.plotly_chart(px.bar(contribution_df, x="Alpha", y="Sleeve PnL Contribution"), use_container_width=True)
-
-    cost_drag_df = alpha_table[["Alpha name", "Transaction cost drag", "Turnover"]].sort_values("Transaction cost drag", ascending=False)
-    st.subheader("Alphas Most Hurt by Transaction Costs")
-    st.dataframe(
-        cost_drag_df.style.format({"Transaction cost drag": "{:.2%}", "Turnover": "{:.2f}"}),
-        use_container_width=True,
-    )
-
-    selected_alpha = st.selectbox("Select Formulaic Alpha Detail", list(alpha_results.keys()))
-    selected_result = alpha_results[selected_alpha]
-    gross_equity = (1 + selected_result["gross_returns"].dropna()).cumprod()
-    net_equity = (1 + selected_result["net_returns"].dropna()).cumprod()
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=gross_equity.index, y=gross_equity, name="Gross", line=dict(dash="dash")))
-    fig.add_trace(go.Scatter(x=net_equity.index, y=net_equity, name="Net"))
-    fig.update_layout(title=f"{selected_alpha} Gross vs Net Performance", xaxis_title="Date", yaxis_title="Growth of 1.0", template="plotly_white")
+    fig.add_trace(go.Scatter(x=result["gross_equity"].index, y=result["gross_equity"], name="Gross", line=dict(dash="dash")))
+    fig.add_trace(go.Scatter(x=result["strategy_equity"].index, y=result["strategy_equity"], name="Net"))
+    if not result["benchmark_equity"].empty:
+        fig.add_trace(go.Scatter(x=result["benchmark_equity"].index, y=result["benchmark_equity"], name=f"{result['benchmark_symbol']} Benchmark"))
+    fig.update_layout(title=f"{result['strategy_name']} Gross vs Net Backtest", xaxis_title="Date", yaxis_title="Growth of 1.0", template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
-    latest_weights = selected_result["target_weights"].iloc[-1]
-    st.write(f"**Current selected ETFs:** {format_holdings(latest_weights)}")
+    metrics = result["metrics"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Gross Return", f"{metrics['gross_return'] * 100:.2f}%")
+    c2.metric("Net Return", f"{metrics['net_return'] * 100:.2f}%")
+    c3.metric("Sharpe", f"{metrics['sharpe']:.2f}")
+    c4.metric("Max Drawdown", f"{metrics['max_drawdown'] * 100:.2f}%")
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Volatility", f"{metrics['volatility'] * 100:.2f}%")
+    c6.metric("Turnover", f"{metrics['total_turnover']:.2f}x")
+    c7.metric("Cost Drag", f"{metrics['transaction_cost_drag'] * 100:.2f}%")
+
+    if result["monthly_holdings"]:
+        holdings_df = pd.DataFrame(
+            [{"Signal Date": h["Date"].strftime("%Y-%m-%d"), "Holdings": h["Holdings_str"]} for h in result["monthly_holdings"]]
+        )
+        st.subheader("Recent Monthly Holdings")
+        st.dataframe(holdings_df.tail(24), use_container_width=True)
 
 
-def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol):
+def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol, strategy_allocation=None):
     st.header("Backtesting")
     result = results.get(selected_strategy)
     if result is None:
@@ -2989,7 +2330,7 @@ def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, sele
         st.dataframe(monthly_returns.style.format("{:.2%}"), use_container_width=True)
 
     st.subheader("Strategy Returns Table")
-    table = build_strategy_monitoring_table(results)
+    table = build_strategy_monitoring_table(results, strategy_allocation=strategy_allocation)
     st.dataframe(
         table[["Strategy", "Gross Return", "Net Return", "Sharpe", "Volatility", "Max Drawdown", "Current Drawdown", "Turnover", "Cost Drag"]]
         .style.format(
@@ -3006,53 +2347,6 @@ def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, sele
         ),
         use_container_width=True,
     )
-
-    render_stress_period_analysis(results, portfolio_returns, benchmark_symbol)
-    render_walk_forward_placeholder(portfolio_returns)
-
-
-def render_stress_period_analysis(results, portfolio_returns, benchmark_symbol):
-    st.subheader("Stress Period Analysis")
-    periods = {
-        "COVID Crash": ("2020-02-15", "2020-04-30"),
-        "2022 Rate Shock": ("2022-01-01", "2022-12-31"),
-    }
-    rows = []
-    strategy_returns = get_strategy_returns_frame(results)
-    benchmark = None
-    for result in results.values():
-        if result is not None and result["benchmark_symbol"] == benchmark_symbol:
-            benchmark = result["benchmark_returns"]
-            break
-    for label, (start, end) in periods.items():
-        start_ts = pd.Timestamp(start)
-        end_ts = pd.Timestamp(end)
-        mask = (portfolio_returns.index >= start_ts) & (portfolio_returns.index <= end_ts)
-        if not mask.any():
-            rows.append({"Period": label, "Status": "not enough data"})
-            continue
-        period_returns = portfolio_returns.loc[mask, "Net Return"]
-        strategy_period = strategy_returns.loc[(strategy_returns.index >= start_ts) & (strategy_returns.index <= end_ts)]
-        strategy_total = (1 + strategy_period).prod() - 1 if not strategy_period.empty else pd.Series(dtype=float)
-        portfolio_return = (1 + period_returns).prod() - 1
-        benchmark_period = benchmark.loc[(benchmark.index >= start_ts) & (benchmark.index <= end_ts)].dropna() if benchmark is not None else pd.Series(dtype=float)
-        benchmark_return = (1 + benchmark_period).prod() - 1 if not benchmark_period.empty else np.nan
-        equity = (1 + period_returns).cumprod()
-        drawdown = (equity / equity.cummax() - 1).min()
-        rows.append(
-            {
-                "Period": label,
-                "Status": "ok",
-                "Portfolio Return": portfolio_return,
-                f"{benchmark_symbol} Return": benchmark_return,
-                "Best Strategy": strategy_total.idxmax() if not strategy_total.empty else "N/A",
-                "Worst Strategy": strategy_total.idxmin() if not strategy_total.empty else "N/A",
-                "Drawdown": drawdown,
-            }
-        )
-    stress_df = pd.DataFrame(rows)
-    st.dataframe(stress_df.style.format({"Portfolio Return": "{:.2%}", f"{benchmark_symbol} Return": "{:.2%}", "Drawdown": "{:.2%}"}), use_container_width=True)
-
 
 def build_dynamic_allocation_backtest(results, close, max_strategy_weight=0.25, benchmark_symbol="SPY"):
     strategy_returns = get_strategy_returns_frame(results)
@@ -3128,111 +2422,6 @@ def render_dynamic_backtest(results, close, max_strategy_weight, benchmark_symbo
         st.plotly_chart(px.scatter(allocation_history.reset_index(), x="Date", y="Regime", color="Regime", size="Confidence"), use_container_width=True)
 
 
-def render_walk_forward_placeholder(portfolio_returns):
-    st.subheader("Walk-Forward Testing")
-    st.write("Full walk-forward optimization will be added later. This MVP keeps strategy rules fixed and reports a simple train/test split summary.")
-    if portfolio_returns.empty:
-        return
-    split = int(len(portfolio_returns) * 0.70)
-    train = portfolio_returns.iloc[:split]["Net Return"]
-    test = portfolio_returns.iloc[split:]["Net Return"]
-    summary = pd.DataFrame(
-        [
-            {"Sample": "In-Sample First 70%", "Start": train.index.min(), "End": train.index.max(), "Return": (1 + train).prod() - 1, "Sharpe": train.mean() * 252 / (train.std() * np.sqrt(252)) if train.std() > 0 else np.nan},
-            {"Sample": "Out-of-Sample Last 30%", "Start": test.index.min(), "End": test.index.max(), "Return": (1 + test).prod() - 1, "Sharpe": test.mean() * 252 / (test.std() * np.sqrt(252)) if test.std() > 0 else np.nan},
-        ]
-    )
-    st.dataframe(summary.style.format({"Return": "{:.2%}", "Sharpe": "{:.2f}"}), use_container_width=True)
-
-
-def render_strategy_workflow(results):
-    st.header("Strategy Workflow")
-    table = build_strategy_monitoring_table(results)
-    rows = []
-    for _, row in table.iterrows():
-        rows.append(
-            {
-                "Strategy": row["Strategy"],
-                "Idea": "Done",
-                "Hypothesis": "Drafted",
-                "Data": "Available",
-                "Signal": "Implemented",
-                "Backtest": "Completed",
-                "Transaction Cost Included": "Yes",
-                "Risk Limits": "Basic",
-                "Live Monitoring": "Simulated",
-                "Allocation Decision": f"Equal Weight / {row['Recommended Action']}",
-                "Notes": row["Reason"],
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
-
-def compute_performance(close):
-    performance = {}
-    for label, days in PERFORMANCE_WINDOWS.items():
-        if len(close) < days + 1:
-            performance[label] = np.nan
-            continue
-        performance[label] = (close.iloc[-1] / close.shift(days).iloc[-1] - 1) * 100
-    return pd.DataFrame(performance, index=close.columns)
-
-
-def compute_volatility(returns):
-    vol = returns.rolling(window=22).std() * np.sqrt(252) * 100
-    return vol.iloc[-1]
-
-
-def moving_average_signal(close):
-    signal = {}
-    for symbol in close.columns:
-        prices = close[symbol].dropna()
-        if len(prices) < 20:
-            signal[symbol] = "Not enough data"
-            continue
-        ma20 = prices.rolling(window=20).mean()
-        ma50 = prices.rolling(window=50).mean()
-        if len(ma50.dropna()) == 0:
-            signal[symbol] = "Waiting"
-        elif ma20.iloc[-1] > ma50.iloc[-1]:
-            signal[symbol] = "Bullish"
-        elif ma20.iloc[-1] < ma50.iloc[-1]:
-            signal[symbol] = "Bearish"
-        else:
-            signal[symbol] = "Neutral"
-    return pd.Series(signal)
-
-
-def format_percent(df):
-    return df.round(2)
-
-
-def ai_style_summary(performance, volatility, signal, window):
-    window_returns = performance[window]
-    best = window_returns.idxmax()
-    worst = window_returns.idxmin()
-    best_return = window_returns.loc[best]
-    worst_return = window_returns.loc[worst]
-    high_vol = volatility.sort_values(ascending=False).head(3).index.tolist()
-    bullish = signal[signal == "Bullish"].index.tolist()
-    bearish = signal[signal == "Bearish"].index.tolist()
-
-    summary = [
-        f"Over the {window} window, the top performer is **{best}** with a return of {best_return:.2f}%.",
-        f"The weakest performer is **{worst}** with a return of {worst_return:.2f}%.",
-        f"Highest recent volatility appears in: {', '.join(high_vol)}.",
-    ]
-
-    if bullish:
-        summary.append(f"The moving average setup favors bullish momentum for: {', '.join(bullish)}.")
-    if bearish:
-        summary.append(f"Caution is suggested for: {', '.join(bearish)} due to bearish MA signals.")
-    if not bullish and not bearish:
-        summary.append("The market is mixed and no strong MA signals are present.")
-
-    return "\n\n".join(summary)
-
-
 def main():
     st.title("Regime-Aware Multi-Strategy Portfolio Dashboard")
     st.write(
@@ -3256,7 +2445,7 @@ def main():
     all_etf_symbols = get_all_etf_symbols()
     ma_default_index = all_etf_symbols.index("SPY") if "SPY" in all_etf_symbols else 0
     ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
-    selected_strategy = st.sidebar.selectbox("Strategy Detail", STRATEGY_SLEEVE_TYPES, index=0)
+    selected_strategy = st.sidebar.selectbox("Strategy Detail", STRATEGY_TYPES, index=0)
     backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
     portfolio_mode = st.sidebar.selectbox("Portfolio Mode", PORTFOLIO_MODES, index=2)
     top_n_stocks = st.sidebar.slider("Top N Stocks", min_value=3, max_value=25, value=10, step=1)
@@ -3264,8 +2453,6 @@ def main():
     transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps per buy/sell)", min_value=0, max_value=100, value=5, step=1)
     transaction_cost = transaction_cost_bps / 10000
     initial_portfolio_value = st.sidebar.number_input("Initial Capital", min_value=10000, value=INITIAL_CAPITAL, step=50000)
-    rebalance_frequency = st.sidebar.selectbox("Rebalance Frequency", REBALANCE_FREQUENCIES, index=2)
-    risk_free_rate = st.sidebar.number_input("Risk-Free Rate", min_value=0.0, max_value=0.10, value=0.0, step=0.005)
     st.sidebar.markdown("---")
     st.sidebar.subheader("Allocation Settings")
     default_etf_weight = 0.70 if portfolio_mode == "ETF-only" else 0.0 if portfolio_mode == "Stock-only" else 0.60
@@ -3279,7 +2466,6 @@ def main():
     max_sector_exposure = st.sidebar.slider("Max Sector Exposure", 0.10, 0.60, RISK_LIMITS["max_sector_exposure"], step=0.05)
     risk_off_cash_min = st.sidebar.slider("Risk-Off Cash Minimum", 0.0, 0.50, RISK_LIMITS["risk_off_cash_minimum"], step=0.05)
     enable_cash_allocation = st.sidebar.checkbox("Enable Cash Allocation", value=True)
-    show_advanced_metrics = st.sidebar.checkbox("Show Advanced Metrics", value=True)
 
     st.sidebar.markdown("---")
     st.sidebar.write("**ETF universe includes:**")
@@ -3319,7 +2505,7 @@ def main():
     )
     st.caption("Hourly refresh does not mean intraday trading. Official signals and backtests use daily bars.")
 
-    with st.spinner("Running 10 ETF strategy backtests..."):
+    with st.spinner("Running ETF strategy backtests..."):
         strategy_results = run_all_strategy_backtests(
             backtest_close,
             transaction_cost,
@@ -3328,23 +2514,18 @@ def main():
         )
 
     strategy_results = {name: result for name, result in strategy_results.items() if result is not None}
-    with st.spinner("Running Formulaic Alpha Sleeve..."):
-        formulaic_sleeve_result, formulaic_alpha_results, formulaic_alpha_correlations, formulaic_alpha_returns = run_formulaic_alpha_sleeve(
-            backtest_ohlcv,
-            transaction_cost=transaction_cost,
-            benchmark_symbol=benchmark_symbol,
-            top_n=3,
-        )
-    if formulaic_sleeve_result is not None:
-        strategy_results[FORMULAIC_ALPHA_SLEEVE] = formulaic_sleeve_result
-
     if not strategy_results:
         st.error("No strategy backtests could be calculated with the selected data.")
         return
 
-    portfolio_returns, portfolio_metrics = build_portfolio_backtest(strategy_results, initial_capital=initial_portfolio_value)
     regime = detect_market_regime(backtest_close)
     strategy_allocation = build_regime_aware_strategy_allocation(strategy_results, regime, max_strategy_weight=max_strategy_weight)
+    strategy_weights = strategy_allocation.set_index("Strategy")["Final Strategy Weight"]
+    portfolio_returns, portfolio_metrics = build_portfolio_backtest(
+        strategy_results,
+        initial_capital=initial_portfolio_value,
+        strategy_weights=strategy_weights,
+    )
     asset_targets = adjust_asset_class_targets(
         regime["regime_name"],
         etf_allocation_pct,
@@ -3365,7 +2546,13 @@ def main():
         asset_targets,
         initial_portfolio_value,
         max_position_weight=max_position_weight,
+        max_sector_exposure=max_sector_exposure,
     )
+    if not stock_selection.empty:
+        stock_weight_map = position_allocation[position_allocation["Asset Type"] == "Stock"].set_index("Ticker")["Portfolio Weight"]
+        stock_selection = stock_selection.copy()
+        stock_selection["Assigned Portfolio Weight"] = stock_selection["Ticker"].map(stock_weight_map).fillna(0.0)
+        stock_selection["Dollar Allocation"] = stock_selection["Assigned Portfolio Weight"] * initial_portfolio_value
 
     portfolio_tab, regime_tab, strategy_allocation_tab, etf_signals_tab, stock_selection_tab, risk_tab, backtesting_tab = st.tabs(
         [
@@ -3398,7 +2585,7 @@ def main():
         render_strategy_allocation_tab(strategy_allocation)
 
     with etf_signals_tab:
-        render_clean_strategy_monitoring(strategy_results, initial_capital=initial_portfolio_value)
+        render_clean_strategy_monitoring(strategy_results, initial_capital=initial_portfolio_value, strategy_allocation=strategy_allocation)
 
     with stock_selection_tab:
         render_stock_selection_tab(stock_selection)
@@ -3413,18 +2600,9 @@ def main():
             max_position_weight,
             max_sector_exposure,
         )
-        if show_advanced_metrics:
-            with st.expander("Advanced factor and Formulaic Alpha details"):
-                render_risk_factors(
-                    strategy_results,
-                    backtest_close,
-                    formulaic_sleeve_result=formulaic_sleeve_result,
-                    formulaic_alpha_results=formulaic_alpha_results,
-                    formulaic_alpha_correlations=formulaic_alpha_correlations,
-                )
 
     with backtesting_tab:
-        render_clean_backtesting(strategy_results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol)
+        render_clean_backtesting(strategy_results, portfolio_returns, portfolio_metrics, selected_strategy, benchmark_symbol, strategy_allocation=strategy_allocation)
         render_dynamic_backtest(strategy_results, backtest_close, max_strategy_weight, benchmark_symbol)
 
     st.write("---")
