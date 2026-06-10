@@ -2490,15 +2490,27 @@ def render_risk_dashboard(results, close, portfolio_metrics, position_allocation
 
     correlations = calculate_strategy_correlations(results)
     if not correlations.empty:
-        st.plotly_chart(px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Matrix", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
+        st.plotly_chart(
+            px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Matrix", color_continuous_scale="RdBu_r", zmin=-1, zmax=1),
+            use_container_width=True,
+            key="risk_dashboard_strategy_correlation_matrix",
+        )
     exposures = estimate_factor_exposures(results, close)
     if not exposures.empty:
         portfolio_exposure = exposures.mean().sort_values()
-        st.plotly_chart(px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"), use_container_width=True)
+        st.plotly_chart(
+            px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"),
+            use_container_width=True,
+            key="risk_dashboard_portfolio_factor_exposure",
+        )
         st.dataframe(exposures.style.format("{:.2f}"), use_container_width=True)
     risk_contributions = calculate_strategy_risk_contributions(results)
     if not risk_contributions.empty:
-        st.plotly_chart(px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Risk Contribution by Strategy"), use_container_width=True)
+        st.plotly_chart(
+            px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Risk Contribution by Strategy"),
+            use_container_width=True,
+            key="risk_dashboard_strategy_risk_contribution",
+        )
     st.subheader("Position Concentration")
     st.dataframe(position_allocation.style.format({"Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}), use_container_width=True)
 
@@ -2817,7 +2829,11 @@ def render_risk_factors(results, close, formulaic_sleeve_result=None, formulaic_
     correlations = calculate_strategy_correlations(results)
     if not correlations.empty:
         st.subheader("Strategy Correlation Heatmap")
-        st.plotly_chart(px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Heatmap", color_continuous_scale="RdBu_r", zmin=-1, zmax=1), use_container_width=True)
+        st.plotly_chart(
+            px.imshow(correlations, text_auto=".2f", title="Strategy Correlation Heatmap", color_continuous_scale="RdBu_r", zmin=-1, zmax=1),
+            use_container_width=True,
+            key="risk_factors_strategy_correlation_heatmap",
+        )
         upper = correlations.where(np.triu(np.ones(correlations.shape), k=1).astype(bool)).stack()
         st.metric("Average Pairwise Strategy Correlation", f"{upper.mean():.2f}" if not upper.empty else "N/A")
         if not upper.empty and (upper.abs() > 0.80).any():
@@ -2830,14 +2846,22 @@ def render_risk_factors(results, close, formulaic_sleeve_result=None, formulaic_
         st.subheader("Strategy-Level Factor Exposure Table")
         st.dataframe(exposures.style.format("{:.2f}"), use_container_width=True)
         portfolio_exposure = exposures.mean().sort_values()
-        st.plotly_chart(px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"), use_container_width=True)
+        st.plotly_chart(
+            px.bar(x=portfolio_exposure.index, y=portfolio_exposure.values, title="Portfolio Factor Exposure"),
+            use_container_width=True,
+            key="risk_factors_portfolio_factor_exposure",
+        )
         if portfolio_exposure.abs().max() > 0.80:
             st.warning("Factor concentration warning: one factor exposure is large relative to the rest.")
 
     risk_contributions = calculate_strategy_risk_contributions(results).sort_values(ascending=False)
     if not risk_contributions.empty:
         st.subheader("Risk Contribution by Strategy")
-        st.plotly_chart(px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Strategy Risk Contribution"), use_container_width=True)
+        st.plotly_chart(
+            px.bar(x=risk_contributions.index, y=risk_contributions.values, title="Strategy Risk Contribution"),
+            use_container_width=True,
+            key="risk_factors_strategy_risk_contribution",
+        )
         st.dataframe(risk_contributions.to_frame("Risk Contribution").style.format("{:.2%}"), use_container_width=True)
 
     if formulaic_sleeve_result is not None and formulaic_alpha_results:
