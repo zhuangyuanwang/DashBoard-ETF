@@ -2075,6 +2075,74 @@ def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_clos
     return portfolio_returns, metrics
 
 
+def build_recent_recommendation_performance(
+    position_allocation,
+    etf_close,
+    stock_close,
+    benchmark_symbol="SPY",
+    initial_capital=INITIAL_CAPITAL,
+    start_date="2026-06-01",
+):
+    if position_allocation.empty:
+        return pd.DataFrame(), {}
+
+    price_sources = [etf_close]
+    if stock_close is not None and not stock_close.empty:
+        price_sources.append(stock_close)
+    prices = pd.concat(price_sources, axis=1)
+    prices = prices.loc[:, ~prices.columns.duplicated()].dropna(how="all")
+    prices = prices.loc[prices.index >= pd.to_datetime(start_date)]
+    if prices.empty:
+        return pd.DataFrame(), {}
+
+    weights = position_allocation.set_index("Ticker")["Portfolio Weight"].copy()
+    if "Cash" in weights.index:
+        weights = weights.drop("Cash")
+    tradable_weights = weights[weights.index.isin(prices.columns)]
+
+    portfolio_returns = pd.Series(0.0, index=prices.index)
+    if not tradable_weights.empty:
+        total_weight = min(1.0, tradable_weights.sum())
+        tradable_weights = tradable_weights / tradable_weights.sum() * total_weight
+        asset_returns = prices[tradable_weights.index].pct_change(fill_method=None).fillna(0.0)
+        portfolio_returns = asset_returns.mul(tradable_weights, axis=1).sum(axis=1)
+
+    benchmark_returns = pd.Series(0.0, index=portfolio_returns.index)
+    if benchmark_symbol in prices.columns:
+        benchmark_returns = prices[benchmark_symbol].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0)
+
+    recent = pd.DataFrame(
+        {
+            "Portfolio Return": portfolio_returns,
+            "Benchmark Return": benchmark_returns,
+        }
+    )
+    recent["Portfolio Value"] = initial_capital * (1 + recent["Portfolio Return"]).cumprod()
+    recent["Benchmark Value"] = initial_capital * (1 + recent["Benchmark Return"]).cumprod()
+    recent["Daily PnL"] = recent["Portfolio Value"].diff().fillna(0.0)
+    recent["Cumulative PnL"] = recent["Portfolio Value"] - initial_capital
+    recent["Excess Return"] = recent["Portfolio Return"] - recent["Benchmark Return"]
+
+    def trailing_return(series, days):
+        if len(series) <= days:
+            return series.iloc[-1] / initial_capital - 1
+        return series.iloc[-1] / series.iloc[-days - 1] - 1
+
+    metrics = {
+        "start_date": recent.index.min(),
+        "end_date": recent.index.max(),
+        "portfolio_return": recent["Portfolio Value"].iloc[-1] / initial_capital - 1,
+        "benchmark_return": recent["Benchmark Value"].iloc[-1] / initial_capital - 1,
+        "excess_return": recent["Portfolio Value"].iloc[-1] / initial_capital - recent["Benchmark Value"].iloc[-1] / initial_capital,
+        "latest_1d": recent["Portfolio Return"].iloc[-1],
+        "latest_5d": trailing_return(recent["Portfolio Value"], 5),
+        "latest_10d": trailing_return(recent["Portfolio Value"], 10),
+        "latest_daily_pnl": recent["Daily PnL"].iloc[-1],
+        "cumulative_pnl": recent["Cumulative PnL"].iloc[-1],
+    }
+    return recent, metrics
+
+
 def build_portfolio_recommendation(metrics):
     if metrics.get("current_drawdown", 0) < -0.10 or metrics.get("max_drawdown", 0) < -0.15:
         return "Reduce risk: portfolio drawdown is above the MVP risk limit."
@@ -2087,6 +2155,55 @@ def build_portfolio_recommendation(metrics):
     return "Keep current allocation: portfolio risk is within MVP limits."
 
 
+def render_recent_recommendation_performance(recent_performance, recent_metrics, benchmark_symbol="SPY"):
+    st.subheader("Recent Recommendation Performance")
+    st.caption(
+        "This checks the current recommended holdings from 2026-06-01 to the latest available trading date. "
+        "It is a model performance check, not a live account statement."
+    )
+    if recent_performance.empty or not recent_metrics:
+        st.info("Recent performance is not available yet because the selected data does not cover 2026-06-01 onward.")
+        return
+
+    period_label = f"{recent_metrics['start_date'].date()} to {recent_metrics['end_date'].date()}"
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Period", period_label)
+    c2.metric("Portfolio Return", f"{recent_metrics['portfolio_return'] * 100:.2f}%")
+    c3.metric(f"{benchmark_symbol} Return", f"{recent_metrics['benchmark_return'] * 100:.2f}%")
+    c4.metric("Excess Return", f"{recent_metrics['excess_return'] * 100:.2f}%")
+
+    c5, c6, c7, c8 = st.columns(4)
+    c5.metric("Latest 1D Return", f"{recent_metrics['latest_1d'] * 100:.2f}%")
+    c6.metric("Recent 5D Return", f"{recent_metrics['latest_5d'] * 100:.2f}%")
+    c7.metric("Recent 10D Return", f"{recent_metrics['latest_10d'] * 100:.2f}%")
+    c8.metric("Cumulative PnL", f"${recent_metrics['cumulative_pnl']:,.0f}")
+
+    chart_df = recent_performance[["Portfolio Value", "Benchmark Value"]].rename(
+        columns={"Benchmark Value": f"{benchmark_symbol} Benchmark Value"}
+    )
+    st.plotly_chart(
+        px.line(chart_df, x=chart_df.index, y=chart_df.columns, title="Recent Recommended Portfolio vs Benchmark"),
+        use_container_width=True,
+    )
+
+    recent_table = recent_performance.tail(10).reset_index().rename(columns={"index": "Date"})
+    st.dataframe(
+        recent_table[
+            ["Date", "Portfolio Value", "Benchmark Value", "Daily PnL", "Cumulative PnL", "Portfolio Return", "Benchmark Return"]
+        ].style.format(
+            {
+                "Portfolio Value": "${:,.0f}",
+                "Benchmark Value": "${:,.0f}",
+                "Daily PnL": "${:,.0f}",
+                "Cumulative PnL": "${:,.0f}",
+                "Portfolio Return": "{:.2%}",
+                "Benchmark Return": "{:.2%}",
+            }
+        ),
+        use_container_width=True,
+    )
+
+
 def render_regime_aware_portfolio_overview(
     results,
     portfolio_returns,
@@ -2096,6 +2213,9 @@ def render_regime_aware_portfolio_overview(
     asset_targets,
     position_allocation,
     initial_capital=INITIAL_CAPITAL,
+    recent_performance=None,
+    recent_metrics=None,
+    benchmark_symbol="SPY",
 ):
     st.header("Portfolio Overview")
     c1, c2, c3, c4 = st.columns(4)
@@ -2111,6 +2231,12 @@ def render_regime_aware_portfolio_overview(
     c8.metric("Risk Status", build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets)["Status"])
     st.info(regime["regime_explanation"])
     st.success(f"Portfolio recommendation: {portfolio_metrics.get('recommendation', 'Keep current allocation')}")
+
+    render_recent_recommendation_performance(
+        recent_performance if recent_performance is not None else pd.DataFrame(),
+        recent_metrics if recent_metrics is not None else {},
+        benchmark_symbol=benchmark_symbol,
+    )
 
     left, right = st.columns(2)
     with left:
@@ -2910,6 +3036,14 @@ def main():
         initial_capital=initial_portfolio_value,
         strategy_results=strategy_results,
     )
+    recent_performance, recent_metrics = build_recent_recommendation_performance(
+        position_allocation,
+        backtest_close,
+        stock_close,
+        benchmark_symbol=benchmark_symbol,
+        initial_capital=initial_portfolio_value,
+        start_date="2026-06-01",
+    )
 
     portfolio_tab, regime_tab, strategy_allocation_tab, etf_signals_tab, unified_ranking_tab, risk_tab, backtesting_tab = st.tabs(
         [
@@ -2933,6 +3067,9 @@ def main():
             asset_targets,
             position_allocation,
             initial_capital=initial_portfolio_value,
+            recent_performance=recent_performance,
+            recent_metrics=recent_metrics,
+            benchmark_symbol=benchmark_symbol,
         )
 
     with regime_tab:
