@@ -1749,6 +1749,71 @@ def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL, strategy_
     return portfolio_returns, metrics
 
 
+def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_close, initial_capital=INITIAL_CAPITAL, strategy_results=None):
+    if position_allocation.empty:
+        return pd.DataFrame(), {}
+
+    price_sources = [etf_close]
+    if stock_close is not None and not stock_close.empty:
+        price_sources.append(stock_close)
+    prices = pd.concat(price_sources, axis=1)
+    prices = prices.loc[:, ~prices.columns.duplicated()].dropna(how="all")
+    returns = prices.pct_change(fill_method=None).fillna(0.0)
+
+    weights = position_allocation.set_index("Ticker")["Portfolio Weight"].copy()
+    cash_weight = weights.pop("Cash") if "Cash" in weights.index else 0.0
+    tradable_weights = weights[weights.index.isin(returns.columns)]
+    missing_weight = weights[~weights.index.isin(returns.columns)].sum()
+    total_cash_weight = cash_weight + missing_weight
+
+    if tradable_weights.empty:
+        common_index = returns.index
+        portfolio_net_returns = pd.Series(0.0, index=common_index)
+    else:
+        tradable_weights = tradable_weights / max(1.0, tradable_weights.sum() + total_cash_weight)
+        common_index = returns.index
+        portfolio_net_returns = returns.loc[common_index, tradable_weights.index].mul(tradable_weights, axis=1).sum(axis=1)
+
+    portfolio_gross_returns = portfolio_net_returns.copy()
+    portfolio_net_value = initial_capital * (1 + portfolio_net_returns).cumprod()
+    portfolio_gross_value = initial_capital * (1 + portfolio_gross_returns).cumprod()
+    portfolio_returns = pd.DataFrame(
+        {
+            "Gross Return": portfolio_gross_returns,
+            "Net Return": portfolio_net_returns,
+            "Gross Value": portfolio_gross_value,
+            "Net Value": portfolio_net_value,
+        }
+    )
+    if portfolio_returns.empty:
+        return pd.DataFrame(), {}
+
+    net_equity = portfolio_net_value / initial_capital
+    gross_equity = portfolio_gross_value / initial_capital
+    metrics = calculate_performance_metrics(net_equity, portfolio_net_returns, 0)
+    var95, es95 = calculate_var_es(portfolio_net_returns, confidence=0.95)
+    metrics["current_drawdown"] = calculate_current_drawdown(net_equity)
+    metrics["portfolio_value"] = portfolio_net_value.iloc[-1]
+    metrics["total_pnl"] = portfolio_net_value.iloc[-1] - initial_capital
+    metrics["gross_return"] = gross_equity.iloc[-1] - 1
+    metrics["net_return"] = net_equity.iloc[-1] - 1
+    metrics["var_95"] = var95
+    metrics["expected_shortfall_95"] = es95
+    metrics["transaction_cost_drag"] = gross_equity.iloc[-1] - net_equity.iloc[-1]
+    metrics["total_turnover"] = 0.0
+    metrics["active_strategies"] = len(strategy_results) if strategy_results else 0
+    metrics["warning_strategies"] = 0
+    metrics["allocations"] = position_allocation.set_index("Ticker")["Portfolio Weight"]
+    if strategy_results:
+        correlations = calculate_strategy_correlations(strategy_results)
+        upper = correlations.where(np.triu(np.ones(correlations.shape), k=1).astype(bool)).stack() if not correlations.empty else pd.Series(dtype=float)
+        metrics["average_pairwise_correlation"] = upper.mean() if not upper.empty else np.nan
+    else:
+        metrics["average_pairwise_correlation"] = np.nan
+    metrics["recommendation"] = build_portfolio_recommendation(metrics)
+    return portfolio_returns, metrics
+
+
 def build_portfolio_recommendation(metrics):
     if metrics.get("current_drawdown", 0) < -0.10 or metrics.get("max_drawdown", 0) < -0.15:
         return "Reduce risk: portfolio drawdown is above the MVP risk limit."
@@ -2534,12 +2599,6 @@ def main():
 
     regime = detect_market_regime(backtest_close)
     strategy_allocation = build_regime_aware_strategy_allocation(strategy_results, regime, max_strategy_weight=max_strategy_weight)
-    strategy_weights = strategy_allocation.set_index("Strategy")["Final Strategy Weight"]
-    portfolio_returns, portfolio_metrics = build_portfolio_backtest(
-        strategy_results,
-        initial_capital=initial_portfolio_value,
-        strategy_weights=strategy_weights,
-    )
     asset_targets = adjust_asset_class_targets(
         regime["regime_name"],
         etf_allocation_pct,
@@ -2549,9 +2608,11 @@ def main():
         risk_off_cash_min=risk_off_cash_min,
     )
     if portfolio_mode == "ETF-only":
-        asset_targets = adjust_asset_class_targets(regime["regime_name"], 0.90, 0.0, 0.10, enable_cash_allocation, risk_off_cash_min)
+        cash_target = max(0.10 if enable_cash_allocation else 0.0, risk_off_cash_min if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"] else 0.0)
+        asset_targets = {"ETFs": 1 - cash_target, "Stocks": 0.0, "Cash / SHY / BIL": cash_target}
     elif portfolio_mode == "Stock-only":
-        asset_targets = adjust_asset_class_targets(regime["regime_name"], 0.0, 0.90, 0.10, enable_cash_allocation, risk_off_cash_min)
+        cash_target = max(0.10 if enable_cash_allocation else 0.0, risk_off_cash_min if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"] else 0.0)
+        asset_targets = {"ETFs": 0.0, "Stocks": 1 - cash_target, "Cash / SHY / BIL": cash_target}
     stock_selection = calculate_stock_selection(stock_close, benchmark_close, regime, top_n=top_n_stocks)
     position_allocation = build_position_allocation(
         strategy_results,
@@ -2567,6 +2628,13 @@ def main():
         stock_selection = stock_selection.copy()
         stock_selection["Assigned Portfolio Weight"] = stock_selection["Ticker"].map(stock_weight_map).fillna(0.0)
         stock_selection["Dollar Allocation"] = stock_selection["Assigned Portfolio Weight"] * initial_portfolio_value
+    portfolio_returns, portfolio_metrics = build_holdings_portfolio_backtest(
+        position_allocation,
+        backtest_close,
+        stock_close,
+        initial_capital=initial_portfolio_value,
+        strategy_results=strategy_results,
+    )
 
     portfolio_tab, regime_tab, strategy_allocation_tab, etf_signals_tab, stock_selection_tab, risk_tab, backtesting_tab = st.tabs(
         [
