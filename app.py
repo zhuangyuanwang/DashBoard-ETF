@@ -1126,15 +1126,15 @@ def run_all_strategy_backtests(close, transaction_cost, ma_symbol="SPY", benchma
 
 
 def render_signal_card(signal):
-    st.subheader("Latest Daily Signal")
+    st.subheader("Latest Strategy Signal")
     st.write(
-        "Rule Match Score is a rule-based score showing how strongly the latest data satisfies the strategy conditions. "
-        "It is not a predicted probability of profit."
+        "This is a model signal for this strategy only. It is not the final portfolio trade recommendation. "
+        "Final tradable weights are shown in Portfolio Overview -> Final Portfolio Holdings."
     )
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Latest Signal Date", signal["Latest Signal Date"])
-    c2.metric("Selected ETF / Asset", signal["Selected Asset"])
-    c3.metric("Signal", signal["Signal"])
+    c2.metric("Model Signal Asset", signal["Selected Asset"])
+    c3.metric("Model Signal", signal["Signal"])
     c4.metric("Rule Match Score", f"{signal['Rule Match Score']:.1f}%")
     c5.metric("Vote", f"{signal['Vote']:+.1f}")
     st.write(f"**Reason:** {signal['Reason']}")
@@ -1417,8 +1417,8 @@ def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, st
                 "Strategy Model Weight": model_allocation,
                 "Portfolio Applied Weight": applied_allocation,
                 "Allocation $": applied_allocation * initial_capital,
-                "Current Holdings": get_current_holdings_text(result),
-                "Latest Signal": signal.get("Signal", "N/A"),
+                "Model Signal Assets": get_current_holdings_text(result),
+                "Model Signal": signal.get("Signal", "N/A"),
                 "Daily PnL": daily_return * applied_allocation * initial_capital if pd.notna(daily_return) else np.nan,
                 "Cumulative PnL": cumulative_return * applied_allocation * initial_capital if pd.notna(cumulative_return) else np.nan,
                 "Gross Return": metrics["gross_return"],
@@ -1430,7 +1430,7 @@ def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, st
                 "Turnover": metrics["total_turnover"],
                 "Cost Drag": metrics["transaction_cost_drag"],
                 "Risk Status": status,
-                "Recommended Action": action,
+                "Risk Management Note": action,
                 "Reason": build_risk_explanation(result, status, max_corr, risk_contribution),
             }
         )
@@ -2070,8 +2070,8 @@ def render_risk_dashboard(results, close, portfolio_metrics, position_allocation
 def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL, strategy_allocation=None, etf_portfolio_weight=1.0):
     st.header("Strategies Live Monitoring")
     st.caption(
-        "Strategy Model Weight is the relative weight among ETF strategy sleeves. "
-        "Portfolio Applied Weight is the actual portfolio weight after the selected Portfolio Mode and ETF allocation are applied."
+        "This tab monitors strategy model signals. Model Signal Assets are not final portfolio holdings. "
+        "Strategy Model Weight is the relative weight among ETF strategy sleeves; Portfolio Applied Weight is the actual ETF sleeve weight after Portfolio Mode is applied."
     )
     table = build_strategy_monitoring_table(
         results,
@@ -2144,7 +2144,7 @@ def render_clean_strategy_monitoring(results, initial_capital=INITIAL_CAPITAL, s
     st.plotly_chart(px.area(x=result["trading_costs"].index, y=result["trading_costs"].cumsum(), title="Cumulative Transaction Cost Drag"), use_container_width=True)
     st.subheader("Risk Limit Explanation")
     selected_row = table[table["Strategy"] == selected_strategy].iloc[0]
-    st.write(f"Risk status: **{selected_row['Risk Status']}**. Recommended action: **{selected_row['Recommended Action']}**.")
+    st.write(f"Risk status: **{selected_row['Risk Status']}**. Risk management note: **{selected_row['Risk Management Note']}**.")
     st.write(selected_row["Reason"])
 
 
