@@ -1518,6 +1518,267 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     return raw.sort_values("Stock Score", ascending=False).head(top_n)
 
 
+def normalize_series(values):
+    values = pd.Series(values).replace([np.inf, -np.inf], np.nan)
+    if values.dropna().empty:
+        return pd.Series(0.0, index=values.index)
+    ranked = values.rank(pct=True)
+    return ranked.fillna(0.0)
+
+
+def calculate_etf_asset_scores(close, strategy_allocation, regime):
+    if close.empty:
+        return pd.DataFrame()
+    etf_category_map = get_etf_category_map()
+    etf_symbols = [symbol for symbol in close.columns if symbol in etf_category_map]
+    if not etf_symbols:
+        return pd.DataFrame()
+
+    etf_close = close[etf_symbols].dropna(how="all")
+    if len(etf_close) < 200:
+        return pd.DataFrame()
+
+    returns = etf_close.pct_change(fill_method=None)
+    ret60 = etf_close.pct_change(60, fill_method=None).iloc[-1]
+    ret120 = etf_close.pct_change(120, fill_method=None).iloc[-1]
+    ma50 = etf_close.rolling(50).mean().iloc[-1]
+    ma200 = etf_close.rolling(200).mean().iloc[-1]
+    trend_conditions = ((etf_close.iloc[-1] > ma50).astype(float) + (etf_close.iloc[-1] > ma200).astype(float)) / 2
+    vol60 = returns.rolling(60).std().iloc[-1] * np.sqrt(252)
+    drawdown = etf_close.tail(120) / etf_close.tail(120).cummax() - 1
+    recent_drawdown = drawdown.min()
+    if "SPY" in etf_close.columns:
+        relative_strength = ret60 - etf_close["SPY"].pct_change(60, fill_method=None).iloc[-1]
+    else:
+        relative_strength = ret60.copy()
+
+    strategy_support = pd.Series(0.0, index=etf_symbols)
+    if strategy_allocation is not None and not strategy_allocation.empty:
+        for _, row in strategy_allocation.iterrows():
+            selected_assets = parse_selected_assets(row.get("Selected Asset", ""))
+            selected_assets = [asset for asset in selected_assets if asset in strategy_support.index]
+            if not selected_assets:
+                continue
+            support = row.get("Final Strategy Weight", row.get("Final Allocation", 0.0)) / len(selected_assets)
+            for asset in selected_assets:
+                strategy_support.loc[asset] += support
+
+    momentum_score = normalize_series(0.55 * ret60 + 0.45 * ret120)
+    relative_score = normalize_series(relative_strength)
+    trend_score = trend_conditions.reindex(etf_symbols).fillna(0.0)
+    volatility_score = normalize_series(-vol60)
+    drawdown_score = normalize_series(recent_drawdown)
+    strategy_score = normalize_series(strategy_support)
+
+    raw = pd.DataFrame(
+        {
+            "Ticker": etf_symbols,
+            "Asset Type": "ETF",
+            "Category": [etf_category_map.get(symbol, "ETF") for symbol in etf_symbols],
+            "Current Price": etf_close.iloc[-1].reindex(etf_symbols).values,
+            "60D Return": ret60.reindex(etf_symbols).values,
+            "120D Return": ret120.reindex(etf_symbols).values,
+            "Volatility": vol60.reindex(etf_symbols).values,
+            "Drawdown": recent_drawdown.reindex(etf_symbols).values,
+            "Momentum Score": momentum_score.reindex(etf_symbols).values,
+            "Relative Strength Score": relative_score.reindex(etf_symbols).values,
+            "Trend Score": trend_score.reindex(etf_symbols).values,
+            "Volatility Score": volatility_score.reindex(etf_symbols).values,
+            "Drawdown Score": drawdown_score.reindex(etf_symbols).values,
+            "ETF Strategy Score": strategy_score.reindex(etf_symbols).values,
+        }
+    ).dropna(subset=["Current Price"])
+
+    raw["Final Score"] = (
+        0.25 * raw["Momentum Score"]
+        + 0.20 * raw["Relative Strength Score"]
+        + 0.20 * raw["Trend Score"]
+        + 0.15 * raw["Volatility Score"]
+        + 0.10 * raw["Drawdown Score"]
+        + 0.10 * raw["ETF Strategy Score"]
+    )
+    if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"]:
+        raw["Final Score"] += np.where(raw["Category"].isin(["Asset Classes", "Factor ETFs"]), 0.08, 0.0)
+    elif regime["regime_name"] in ["Risk-On Bull Market", "Growth-Led Market"]:
+        raw["Final Score"] += np.where(raw["Category"].isin(["Broad Market", "Sectors"]), 0.08, 0.0)
+    raw["Reason"] = raw.apply(
+        lambda row: (
+            f"{row['Ticker']} unified score combines ETF strategy support, momentum, trend, "
+            f"relative strength, volatility, drawdown, and {regime['regime_name']} regime fit."
+        ),
+        axis=1,
+    )
+    return raw.sort_values("Final Score", ascending=False)
+
+
+def build_unified_asset_ranking(etf_close, stock_selection, strategy_allocation, regime):
+    etf_scores = calculate_etf_asset_scores(etf_close, strategy_allocation, regime)
+    ranking_parts = []
+    if not etf_scores.empty:
+        etf_rank = etf_scores.copy()
+        etf_rank["Score Source"] = "ETF Strategy + Market Score"
+        ranking_parts.append(etf_rank)
+
+    if stock_selection is not None and not stock_selection.empty:
+        stock_rank = stock_selection.copy()
+        stock_rank["Asset Type"] = "Stock"
+        stock_rank["Final Score"] = normalize_series(stock_rank["Stock Score"]).values
+        stock_rank["Score Source"] = "Stock Market Score"
+        stock_rank["Momentum Score"] = stock_rank.get("momentum_score", np.nan)
+        stock_rank["Relative Strength Score"] = stock_rank.get("relative_strength_score", np.nan)
+        stock_rank["Trend Score"] = stock_rank.get("trend_score", np.nan)
+        stock_rank["Volatility Score"] = stock_rank.get("volatility_score", np.nan)
+        stock_rank["Drawdown Score"] = stock_rank.get("drawdown_score", np.nan)
+        stock_rank["ETF Strategy Score"] = 0.0
+        ranking_parts.append(stock_rank)
+
+    if not ranking_parts:
+        return pd.DataFrame()
+
+    ranking = pd.concat(ranking_parts, ignore_index=True, sort=False)
+    ranking["Category"] = ranking["Category"].fillna("Other")
+    ranking["Final Score"] = ranking["Final Score"].clip(lower=0)
+    display_cols = [
+        "Ticker",
+        "Asset Type",
+        "Category",
+        "Final Score",
+        "Score Source",
+        "Momentum Score",
+        "Relative Strength Score",
+        "Trend Score",
+        "Volatility Score",
+        "Drawdown Score",
+        "ETF Strategy Score",
+        "Current Price",
+        "60D Return",
+        "120D Return",
+        "Volatility",
+        "Drawdown",
+        "Reason",
+    ]
+    display_cols = [col for col in display_cols if col in ranking.columns]
+    return ranking.sort_values("Final Score", ascending=False)[display_cols].reset_index(drop=True)
+
+
+def constrain_position_table(position_rows, initial_capital, max_position_weight=0.10, max_sector_exposure=0.35):
+    if not position_rows:
+        return pd.DataFrame(columns=["Ticker", "Asset Type", "Source", "Sector/Category", "Portfolio Weight", "Dollar Allocation", "Signal", "Reason"])
+
+    raw = pd.DataFrame(position_rows)
+    grouped = (
+        raw.groupby("Ticker", as_index=False)
+        .agg(
+            {
+                "Asset Type": "first",
+                "Source": lambda values: ", ".join(dict.fromkeys(values)),
+                "Sector/Category": "first",
+                "Portfolio Weight": "sum",
+                "Signal": lambda values: ", ".join(dict.fromkeys(values)),
+                "Reason": lambda values: " | ".join(dict.fromkeys(values)),
+            }
+        )
+    )
+
+    overflow = 0.0
+    capped_weights = {}
+    for _, row in grouped.iterrows():
+        weight = row["Portfolio Weight"]
+        if row["Asset Type"] != "Cash" and weight > max_position_weight:
+            capped_weights[row["Ticker"]] = max_position_weight
+            overflow += weight - max_position_weight
+        else:
+            capped_weights[row["Ticker"]] = weight
+    grouped["Portfolio Weight"] = grouped["Ticker"].map(capped_weights)
+
+    sector_excess = 0.0
+    sector_weights = grouped[grouped["Asset Type"] != "Cash"].groupby("Sector/Category")["Portfolio Weight"].sum()
+    for category, weight in sector_weights.items():
+        if weight <= max_sector_exposure:
+            continue
+        scale = max_sector_exposure / weight
+        mask = (grouped["Sector/Category"] == category) & (grouped["Asset Type"] != "Cash")
+        before = grouped.loc[mask, "Portfolio Weight"].sum()
+        grouped.loc[mask, "Portfolio Weight"] *= scale
+        sector_excess += before - grouped.loc[mask, "Portfolio Weight"].sum()
+    overflow += sector_excess
+
+    if overflow > 0:
+        cash_mask = grouped["Ticker"] == "Cash"
+        if cash_mask.any():
+            grouped.loc[cash_mask, "Portfolio Weight"] += overflow
+            grouped.loc[cash_mask, "Reason"] = grouped.loc[cash_mask, "Reason"] + " Excess allocation moved to cash after constraints."
+        else:
+            grouped = pd.concat(
+                [
+                    grouped,
+                    pd.DataFrame(
+                        [
+                            {
+                                "Ticker": "Cash",
+                                "Asset Type": "Cash",
+                                "Source": "Risk Manager",
+                                "Sector/Category": "Cash",
+                                "Portfolio Weight": overflow,
+                                "Signal": "CASH",
+                                "Reason": "Excess allocation moved to cash after constraints.",
+                            }
+                        ]
+                    ),
+                ],
+                ignore_index=True,
+            )
+
+    total = grouped["Portfolio Weight"].sum()
+    if total > 0:
+        grouped["Portfolio Weight"] = grouped["Portfolio Weight"] / total
+    grouped["Dollar Allocation"] = grouped["Portfolio Weight"] * initial_capital
+    return grouped.sort_values("Portfolio Weight", ascending=False)[
+        ["Ticker", "Asset Type", "Source", "Sector/Category", "Portfolio Weight", "Dollar Allocation", "Signal", "Reason"]
+    ].reset_index(drop=True)
+
+
+def build_unified_portfolio_allocation(asset_ranking, asset_targets, initial_capital, max_position_weight=0.10, max_sector_exposure=0.35):
+    if asset_ranking.empty:
+        return constrain_position_table([], initial_capital, max_position_weight, max_sector_exposure)
+
+    position_rows = []
+    for asset_type, target_key in [("ETF", "ETFs"), ("Stock", "Stocks")]:
+        budget = asset_targets.get(target_key, 0.0)
+        candidates = asset_ranking[(asset_ranking["Asset Type"] == asset_type) & (asset_ranking["Final Score"] > 0)].copy()
+        if budget <= 0 or candidates.empty:
+            continue
+        score_weights = candidates["Final Score"] / candidates["Final Score"].sum()
+        for idx, row in candidates.iterrows():
+            position_rows.append(
+                {
+                    "Ticker": row["Ticker"],
+                    "Asset Type": asset_type,
+                    "Source": "Unified Ranking Engine",
+                    "Sector/Category": row.get("Category", "Other"),
+                    "Portfolio Weight": budget * score_weights.loc[idx],
+                    "Signal": "BUY",
+                    "Reason": row.get("Reason", "Selected by unified asset ranking score."),
+                }
+            )
+
+    cash_budget = asset_targets.get("Cash / SHY / BIL", 0.0)
+    if cash_budget > 0:
+        position_rows.append(
+            {
+                "Ticker": "Cash",
+                "Asset Type": "Cash",
+                "Source": "Risk Manager",
+                "Sector/Category": "Cash",
+                "Portfolio Weight": cash_budget,
+                "Signal": "CASH",
+                "Reason": "Required cash buffer from asset allocation and risk controls.",
+            }
+        )
+
+    return constrain_position_table(position_rows, initial_capital, max_position_weight, max_sector_exposure)
+
+
 def parse_selected_assets(selected_asset):
     assets = [asset.strip() for asset in str(selected_asset).split(",")]
     return [asset for asset in assets if asset and asset not in ["Cash", "N/A", "None"]]
@@ -1873,8 +2134,11 @@ def render_regime_aware_portfolio_overview(
         use_container_width=True,
     )
 
-    st.subheader("Final Portfolio Holdings")
-    st.caption("These are final position-level holdings after aggregating strategy signals, stock selector weights, cash allocation, and position/sector caps.")
+    st.subheader("Recommended Portfolio")
+    st.caption(
+        "These are final position-level holdings generated by the unified ETF + stock ranking engine, "
+        "then adjusted for cash, position limits, and sector/category concentration."
+    )
     st.dataframe(
         position_allocation.style.format({"Portfolio Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}),
         use_container_width=True,
@@ -1943,47 +2207,54 @@ def render_strategy_allocation_tab(strategy_allocation):
     st.plotly_chart(px.bar(strategy_allocation, x="Strategy", y="Final Allocation", title="Regime-Aware Strategy Weights"), use_container_width=True)
 
 
-def render_stock_selection_tab(stock_selection):
-    st.header("Stock Selection")
-    if stock_selection.empty:
-        st.warning("Stock selection is unavailable. Check stock data or reduce lookback requirements.")
+def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capital=INITIAL_CAPITAL):
+    st.header("Unified ETF + Stock Ranking")
+    st.write(
+        "ETF and stock candidates are scored in one ranking engine. ETF strategy outputs are one input to ETF scores, "
+        "but final portfolio weights are generated from the unified ranking and risk constraints."
+    )
+    if asset_ranking.empty:
+        st.warning("Unified ranking is unavailable. Check ETF/stock data or reduce lookback requirements.")
         return
-    st.subheader("Ranked Stock Candidates")
+    weight_map = position_allocation.set_index("Ticker")["Portfolio Weight"] if not position_allocation.empty else pd.Series(dtype=float)
+    ranking = asset_ranking.copy()
+    ranking["Assigned Portfolio Weight"] = ranking["Ticker"].map(weight_map).fillna(0.0)
+    ranking["Dollar Allocation"] = ranking["Assigned Portfolio Weight"] * initial_capital
+    st.subheader("Unified Ranked Candidates")
     display_cols = [
         "Ticker",
+        "Asset Type",
         "Category",
-        "Stock Score",
+        "Final Score",
+        "Score Source",
         "Assigned Portfolio Weight",
         "Dollar Allocation",
         "Current Price",
-        "20D Return",
         "60D Return",
         "120D Return",
         "Volatility",
         "Drawdown",
-        "Relative Strength vs SPY",
-        "Trend Status",
+        "ETF Strategy Score",
         "Reason",
     ]
-    display_cols = [col for col in display_cols if col in stock_selection.columns]
+    display_cols = [col for col in display_cols if col in ranking.columns]
     st.dataframe(
-        stock_selection[display_cols].style.format(
+        ranking[display_cols].style.format(
             {
-                "Stock Score": "{:.2f}",
+                "Final Score": "{:.2f}",
+                "ETF Strategy Score": "{:.2f}",
                 "Assigned Portfolio Weight": "{:.2%}",
                 "Dollar Allocation": "${:,.0f}",
                 "Current Price": "${:,.2f}",
-                "20D Return": "{:.2%}",
                 "60D Return": "{:.2%}",
                 "120D Return": "{:.2%}",
                 "Volatility": "{:.2%}",
                 "Drawdown": "{:.2%}",
-                "Relative Strength vs SPY": "{:.2%}",
             }
         ),
         use_container_width=True,
     )
-    st.plotly_chart(px.bar(stock_selection, x="Ticker", y="Stock Score", color="Category", title="Top Regime-Aware Stock Scores"), use_container_width=True)
+    st.plotly_chart(px.bar(ranking.head(25), x="Ticker", y="Final Score", color="Asset Type", title="Top Unified Asset Scores"), use_container_width=True)
 
 
 def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets, max_position_weight=0.10, max_sector_exposure=0.35):
@@ -2614,10 +2885,14 @@ def main():
         cash_target = max(0.10 if enable_cash_allocation else 0.0, risk_off_cash_min if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"] else 0.0)
         asset_targets = {"ETFs": 0.0, "Stocks": 1 - cash_target, "Cash / SHY / BIL": cash_target}
     stock_selection = calculate_stock_selection(stock_close, benchmark_close, regime, top_n=top_n_stocks)
-    position_allocation = build_position_allocation(
-        strategy_results,
-        strategy_allocation,
-        stock_selection,
+    asset_ranking = build_unified_asset_ranking(backtest_close, stock_selection, strategy_allocation, regime)
+    if not asset_ranking.empty:
+        if portfolio_mode == "ETF-only":
+            asset_ranking = asset_ranking[asset_ranking["Asset Type"] == "ETF"].reset_index(drop=True)
+        elif portfolio_mode == "Stock-only":
+            asset_ranking = asset_ranking[asset_ranking["Asset Type"] == "Stock"].reset_index(drop=True)
+    position_allocation = build_unified_portfolio_allocation(
+        asset_ranking,
         asset_targets,
         initial_portfolio_value,
         max_position_weight=max_position_weight,
@@ -2636,13 +2911,13 @@ def main():
         strategy_results=strategy_results,
     )
 
-    portfolio_tab, regime_tab, strategy_allocation_tab, etf_signals_tab, stock_selection_tab, risk_tab, backtesting_tab = st.tabs(
+    portfolio_tab, regime_tab, strategy_allocation_tab, etf_signals_tab, unified_ranking_tab, risk_tab, backtesting_tab = st.tabs(
         [
             "Portfolio Overview",
             "Market Regime",
             "Strategy Allocation",
             "ETF Signals",
-            "Stock Selection",
+            "Unified Ranking",
             "Risk Dashboard",
             "Backtest / Walk-Forward",
         ]
@@ -2674,8 +2949,8 @@ def main():
             etf_portfolio_weight=asset_targets.get("ETFs", 0.0),
         )
 
-    with stock_selection_tab:
-        render_stock_selection_tab(stock_selection)
+    with unified_ranking_tab:
+        render_unified_ranking_tab(asset_ranking, position_allocation, initial_capital=initial_portfolio_value)
 
     with risk_tab:
         render_risk_dashboard(
