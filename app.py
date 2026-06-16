@@ -1452,6 +1452,7 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
         return pd.DataFrame()
 
     returns = stock_close.pct_change(fill_method=None)
+    spy_returns = spy.pct_change(fill_method=None)
     ret20 = stock_close.pct_change(20, fill_method=None).iloc[-1]
     ret60 = stock_close.pct_change(60, fill_method=None).iloc[-1]
     ret120 = stock_close.pct_change(120, fill_method=None).iloc[-1]
@@ -1463,6 +1464,12 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     drawdown = stock_close.tail(120) / stock_close.tail(120).cummax() - 1
     recent_max_drawdown = drawdown.min()
     relative_strength = ret60 - spy.pct_change(60, fill_method=None).iloc[-1]
+    beta_window = returns.tail(120)
+    spy_beta_window = spy_returns.reindex(beta_window.index).tail(120)
+    spy_variance = spy_beta_window.var()
+    beta_vs_spy = beta_window.apply(
+        lambda series: series.cov(spy_beta_window) / spy_variance if spy_variance > 0 else np.nan
+    )
 
     raw = pd.DataFrame(
         {
@@ -1477,6 +1484,7 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
             "Volatility": vol20.values,
             "Drawdown": recent_max_drawdown.values,
             "Relative Strength vs SPY": relative_strength.values,
+            "Beta vs SPY": beta_vs_spy.values,
         }
     ).dropna()
     if raw.empty:
@@ -1492,12 +1500,23 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     raw["trend_score"] = ((raw["Distance From MA50"] > 0).astype(float) + (raw["Distance From MA200"] > 0).astype(float)) / 2
     raw["volatility_score"] = (-raw["Volatility"]).rank(pct=True)
     raw["drawdown_score"] = raw["Drawdown"].rank(pct=True)
-    raw["Stock Score"] = (
+    raw["beta_control_score"] = (-(raw["Beta vs SPY"] - 0.85).abs()).rank(pct=True)
+    raw["quality_momentum_score"] = (
         0.30 * raw["momentum_score"]
-        + 0.25 * raw["relative_strength_score"]
+        + 0.20 * raw["relative_strength_score"]
         + 0.20 * raw["trend_score"]
         + 0.15 * raw["volatility_score"]
         + 0.10 * raw["drawdown_score"]
+        + 0.05 * raw["beta_control_score"]
+    )
+    raw["Stock Score"] = (
+        0.25 * raw["momentum_score"]
+        + 0.20 * raw["relative_strength_score"]
+        + 0.15 * raw["trend_score"]
+        + 0.15 * raw["volatility_score"]
+        + 0.10 * raw["drawdown_score"]
+        + 0.10 * raw["beta_control_score"]
+        + 0.05 * raw["quality_momentum_score"]
     )
     preferred = REGIME_STOCK_PREFERENCES.get(regime["regime_name"], [])
     raw["Regime Preference Boost"] = raw["Category"].isin(preferred).astype(float) * 0.15
@@ -1512,7 +1531,10 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
         raw["Stock Score"] += np.where(raw["Category"] == "Financials", 0.20, 0)
     raw["Stock Score"] += raw["Regime Preference Boost"]
     raw["Reason"] = raw.apply(
-        lambda row: f"{row['Ticker']} ranks well for {regime['regime_name']} because of {row['Category']} exposure, relative strength, trend, volatility, and drawdown profile.",
+        lambda row: (
+            f"{row['Ticker']} ranks well for {regime['regime_name']} because of {row['Category']} exposure, "
+            "quality-momentum, relative strength, trend, volatility, drawdown, and beta-control profile."
+        ),
         axis=1,
     )
     return raw.sort_values("Stock Score", ascending=False).head(top_n)
@@ -1649,6 +1671,9 @@ def build_unified_asset_ranking(etf_close, stock_selection, strategy_allocation,
         "Trend Score",
         "Volatility Score",
         "Drawdown Score",
+        "Beta vs SPY",
+        "beta_control_score",
+        "quality_momentum_score",
         "ETF Strategy Score",
         "Current Price",
         "60D Return",
@@ -2075,6 +2100,59 @@ def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_clos
     return portfolio_returns, metrics
 
 
+def calculate_active_risk_metrics(portfolio_returns, benchmark_close, benchmark_symbol="SPY", initial_capital=INITIAL_CAPITAL):
+    if portfolio_returns.empty or benchmark_close.empty or "Net Return" not in portfolio_returns.columns:
+        return {}
+
+    if isinstance(benchmark_close, pd.DataFrame):
+        benchmark_price = benchmark_close.iloc[:, 0].dropna()
+    else:
+        benchmark_price = benchmark_close.dropna()
+    benchmark_return = benchmark_price.pct_change(fill_method=None)
+
+    active = pd.DataFrame(
+        {
+            "Portfolio Return": portfolio_returns["Net Return"],
+            "Benchmark Return": benchmark_return,
+        }
+    ).dropna()
+    if len(active) < 30:
+        return {}
+
+    portfolio_return = active["Portfolio Return"]
+    benchmark_return = active["Benchmark Return"]
+    benchmark_variance = benchmark_return.var()
+    beta = portfolio_return.cov(benchmark_return) / benchmark_variance if benchmark_variance > 0 else np.nan
+    correlation = portfolio_return.corr(benchmark_return)
+    active_return = portfolio_return - benchmark_return
+    tracking_error = active_return.std() * np.sqrt(252)
+    annualized_active_return = active_return.mean() * 252
+    information_ratio = annualized_active_return / tracking_error if tracking_error > 0 else np.nan
+    portfolio_value = initial_capital * (1 + portfolio_return).cumprod()
+    benchmark_value = initial_capital * (1 + benchmark_return).cumprod()
+    total_active_return = portfolio_value.iloc[-1] / initial_capital - benchmark_value.iloc[-1] / initial_capital
+
+    if pd.notna(correlation) and correlation > 0.90 and pd.notna(beta) and 0.80 <= beta <= 1.20:
+        active_risk_note = f"Portfolio is highly benchmark-like versus {benchmark_symbol}; returns are mostly market beta plus active tilts."
+    elif pd.notna(beta) and beta > 1.20:
+        active_risk_note = f"Portfolio has elevated beta versus {benchmark_symbol}; upside and downside may both be amplified."
+    elif pd.notna(beta) and beta < 0.70:
+        active_risk_note = f"Portfolio has defensive beta versus {benchmark_symbol}; it may lag strong risk-on rallies."
+    else:
+        active_risk_note = f"Portfolio has moderate active risk versus {benchmark_symbol}."
+
+    return {
+        "benchmark_symbol": benchmark_symbol,
+        "portfolio_beta": beta,
+        "benchmark_correlation": correlation,
+        "tracking_error": tracking_error,
+        "annualized_active_return": annualized_active_return,
+        "information_ratio": information_ratio,
+        "total_active_return": total_active_return,
+        "active_risk_note": active_risk_note,
+    }
+
+
 def build_recent_recommendation_performance(
     position_allocation,
     etf_close,
@@ -2204,6 +2282,34 @@ def render_recent_recommendation_performance(recent_performance, recent_metrics,
     )
 
 
+def render_active_risk_summary(portfolio_metrics, benchmark_symbol="SPY"):
+    st.subheader("Active Risk vs Benchmark")
+    st.caption(
+        "This layer checks whether the recommended portfolio is meaningfully different from the benchmark "
+        "or mostly behaving like market beta."
+    )
+    if "portfolio_beta" not in portfolio_metrics:
+        st.info("Active risk metrics are unavailable because benchmark history is not aligned with portfolio returns.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"Beta vs {benchmark_symbol}", f"{portfolio_metrics.get('portfolio_beta', np.nan):.2f}")
+    c2.metric(f"Correlation vs {benchmark_symbol}", f"{portfolio_metrics.get('benchmark_correlation', np.nan):.2f}")
+    c3.metric("Tracking Error", f"{portfolio_metrics.get('tracking_error', np.nan) * 100:.2f}%")
+    c4.metric("Information Ratio", f"{portfolio_metrics.get('information_ratio', np.nan):.2f}")
+
+    c5, c6 = st.columns(2)
+    c5.metric("Annualized Active Return", f"{portfolio_metrics.get('annualized_active_return', np.nan) * 100:.2f}%")
+    c6.metric("Total Active Return", f"{portfolio_metrics.get('total_active_return', np.nan) * 100:.2f}%")
+
+    note = portfolio_metrics.get("active_risk_note", "")
+    if note:
+        if portfolio_metrics.get("benchmark_correlation", 0) > 0.90:
+            st.warning(note)
+        else:
+            st.info(note)
+
+
 def render_regime_aware_portfolio_overview(
     results,
     portfolio_returns,
@@ -2237,6 +2343,7 @@ def render_regime_aware_portfolio_overview(
         recent_metrics if recent_metrics is not None else {},
         benchmark_symbol=benchmark_symbol,
     )
+    render_active_risk_summary(portfolio_metrics, benchmark_symbol=benchmark_symbol)
 
     left, right = st.columns(2)
     with left:
@@ -2360,6 +2467,9 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
         "120D Return",
         "Volatility",
         "Drawdown",
+        "Beta vs SPY",
+        "beta_control_score",
+        "quality_momentum_score",
         "ETF Strategy Score",
         "Reason",
     ]
@@ -2376,6 +2486,9 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
                 "120D Return": "{:.2%}",
                 "Volatility": "{:.2%}",
                 "Drawdown": "{:.2%}",
+                "Beta vs SPY": "{:.2f}",
+                "beta_control_score": "{:.2f}",
+                "quality_momentum_score": "{:.2f}",
             }
         ),
         use_container_width=True,
@@ -2423,6 +2536,11 @@ def render_risk_dashboard(results, close, portfolio_metrics, position_allocation
         st.error("Risk limit status: Breach")
     for warning in risk_status["Warnings"]:
         st.write(f"- {warning}")
+
+    render_active_risk_summary(
+        portfolio_metrics,
+        benchmark_symbol=portfolio_metrics.get("benchmark_symbol", "SPY"),
+    )
 
     correlations = calculate_strategy_correlations(results)
     if not correlations.empty:
@@ -3035,6 +3153,14 @@ def main():
         stock_close,
         initial_capital=initial_portfolio_value,
         strategy_results=strategy_results,
+    )
+    portfolio_metrics.update(
+        calculate_active_risk_metrics(
+            portfolio_returns,
+            benchmark_close,
+            benchmark_symbol=benchmark_symbol,
+            initial_capital=initial_portfolio_value,
+        )
     )
     recent_performance, recent_metrics = build_recent_recommendation_performance(
         position_allocation,
