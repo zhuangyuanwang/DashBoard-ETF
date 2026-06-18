@@ -4,8 +4,16 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
+from pathlib import Path
 
 st.set_page_config(page_title="ETF Dashboard", page_icon="📈", layout="wide")
+
+APP_DIR = Path(__file__).resolve().parent
+DATA_DIR = APP_DIR / "data"
+STOCK_UNIVERSE_FILE = DATA_DIR / "stock_universe.csv"
+PRICE_CACHE_DIR = DATA_DIR / "cache"
+STOCK_PRICE_CACHE_FILE = PRICE_CACHE_DIR / "stock_prices.parquet"
+STOCK_PRICE_FALLBACK_CACHE_FILE = PRICE_CACHE_DIR / "stock_prices.pkl"
 
 ETF_UNIVERSE = {
     "Broad Market": ["SPY", "QQQ", "IWM", "DIA"],
@@ -162,14 +170,48 @@ def get_all_etf_symbols():
 
 
 def get_all_stock_symbols():
-    symbols = []
-    for tickers in STOCK_UNIVERSE.values():
-        symbols.extend(tickers)
-    return list(dict.fromkeys(symbols))
+    universe = load_stock_universe_table()
+    return universe["Ticker"].drop_duplicates().tolist()
 
 
 def get_stock_category_map():
-    return {ticker: category for category, tickers in STOCK_UNIVERSE.items() for ticker in tickers}
+    universe = load_stock_universe_table()
+    return universe.set_index("Ticker")["Category"].to_dict()
+
+
+@st.cache_data(ttl=300)
+def load_stock_universe_table(path=str(STOCK_UNIVERSE_FILE)):
+    universe_path = Path(path)
+    required_columns = ["Ticker", "Sector", "Industry", "Category"]
+    if universe_path.exists():
+        universe = pd.read_csv(universe_path)
+        universe.columns = [column.strip() for column in universe.columns]
+        if "Ticker" not in universe.columns:
+            return build_default_stock_universe_table()
+        for column in required_columns:
+            if column not in universe.columns:
+                universe[column] = "Other"
+        universe = universe[required_columns].copy()
+        universe["Ticker"] = universe["Ticker"].astype(str).str.upper().str.strip()
+        for column in ["Sector", "Industry", "Category"]:
+            universe[column] = universe[column].astype(str).str.strip().replace("", "Other")
+        return universe.drop_duplicates("Ticker").sort_values("Ticker").reset_index(drop=True)
+    return build_default_stock_universe_table()
+
+
+def build_default_stock_universe_table():
+    rows = []
+    for category, tickers in STOCK_UNIVERSE.items():
+        for ticker in tickers:
+            rows.append(
+                {
+                    "Ticker": ticker,
+                    "Sector": category,
+                    "Industry": category,
+                    "Category": category,
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 def get_etf_category_map():
@@ -244,6 +286,112 @@ def latest_valid_date(close, signal_date):
     if len(valid_dates) == 0:
         return None
     return valid_dates[-1]
+
+
+def read_price_cache(cache_file=STOCK_PRICE_CACHE_FILE, fallback_file=STOCK_PRICE_FALLBACK_CACHE_FILE):
+    if cache_file.exists():
+        try:
+            return pd.read_parquet(cache_file)
+        except Exception:
+            pass
+    if fallback_file.exists():
+        try:
+            return pd.read_pickle(fallback_file)
+        except Exception:
+            pass
+    return pd.DataFrame()
+
+
+def write_price_cache(prices, cache_file=STOCK_PRICE_CACHE_FILE, fallback_file=STOCK_PRICE_FALLBACK_CACHE_FILE):
+    PRICE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    prices = prices.sort_index()
+    try:
+        prices.to_parquet(cache_file)
+    except Exception:
+        prices.to_pickle(fallback_file)
+
+
+def merge_price_frames(base, update):
+    if base is None or base.empty:
+        return update.copy() if update is not None else pd.DataFrame()
+    if update is None or update.empty:
+        return base.copy()
+    merged = update.combine_first(base)
+    return merged.loc[:, ~merged.columns.duplicated()].sort_index()
+
+
+def download_close_data_chunked(symbols, start_date, end_date, chunk_size=75):
+    symbols = tuple(sorted(set(symbols)))
+    if not symbols:
+        return pd.DataFrame()
+    frames = []
+    for start in range(0, len(symbols), chunk_size):
+        batch = symbols[start : start + chunk_size]
+        df = yf.download(
+            batch,
+            start=start_date,
+            end=end_date,
+            interval="1d",
+            auto_adjust=True,
+            threads=True,
+            progress=False,
+        )
+        if not df.empty:
+            frames.append(extract_close_prices(df, batch))
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, axis=1)
+    return combined.loc[:, ~combined.columns.duplicated()]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_incremental_stock_close_data(symbols, start_date, end_date):
+    symbols = tuple(sorted(set(symbols)))
+    if not symbols:
+        return pd.DataFrame()
+
+    requested_start = pd.to_datetime(start_date).normalize()
+    requested_end = pd.to_datetime(end_date).normalize()
+    download_end = (requested_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    cache = read_price_cache()
+    cache = cache.loc[:, ~cache.columns.duplicated()] if not cache.empty else cache
+    cache_symbols = set(cache.columns) if not cache.empty else set()
+    requested_symbols = set(symbols)
+
+    combined = cache.copy()
+    missing_symbols = sorted(requested_symbols - cache_symbols)
+    if missing_symbols:
+        missing_prices = download_close_data_chunked(
+            missing_symbols,
+            requested_start.strftime("%Y-%m-%d"),
+            download_end,
+        )
+        combined = merge_price_frames(combined, missing_prices)
+
+    existing_symbols = sorted(requested_symbols.intersection(set(combined.columns)))
+    if existing_symbols and not combined.empty:
+        existing_data = combined[existing_symbols].dropna(how="all")
+        if existing_data.empty:
+            tail_start = requested_start
+        else:
+            tail_start = max(requested_start, existing_data.index.max() + pd.tseries.offsets.BDay(1))
+        if tail_start <= requested_end:
+            tail_prices = download_close_data_chunked(
+                existing_symbols,
+                tail_start.strftime("%Y-%m-%d"),
+                download_end,
+            )
+            combined = merge_price_frames(combined, tail_prices)
+
+    if not combined.empty:
+        combined = clean_price_data(combined)
+        write_price_cache(combined)
+        available_symbols = [symbol for symbol in symbols if symbol in combined.columns]
+        return combined.loc[
+            (combined.index >= requested_start) & (combined.index <= requested_end),
+            available_symbols,
+        ]
+    return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
@@ -3024,17 +3172,7 @@ def main():
     )
 
     st.sidebar.header("Settings")
-    selected_tickers = []
-    for category, tickers in ETF_UNIVERSE.items():
-        selected = st.sidebar.multiselect(f"Select {category}", tickers, default=tickers[:2])
-        selected_tickers.extend(selected)
-
-    selected_tickers = list(dict.fromkeys(selected_tickers))
-    if not selected_tickers:
-        st.warning("Please select at least one ticker from the sidebar.")
-        return
-
-    st.sidebar.markdown("---")
+    st.sidebar.caption("ETF universe is managed internally for regime detection, ETF signals, and benchmark comparisons.")
     st.sidebar.subheader("Backtest Settings")
     all_etf_symbols = get_all_etf_symbols()
     ma_default_index = all_etf_symbols.index("SPY") if "SPY" in all_etf_symbols else 0
@@ -3061,16 +3199,12 @@ def main():
     risk_off_cash_min = st.sidebar.slider("Risk-Off Cash Minimum", 0.0, 0.50, RISK_LIMITS["risk_off_cash_minimum"], step=0.05)
     enable_cash_allocation = st.sidebar.checkbox("Enable Cash Allocation", value=True)
 
-    st.sidebar.markdown("---")
-    st.sidebar.write("**ETF universe includes:**")
-    for category, tickers in ETF_UNIVERSE.items():
-        st.sidebar.write(f"- **{category}**: {', '.join(tickers)}")
-
     backtest_end = pd.Timestamp.today().normalize()
     backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
     required_strategy_symbols = {"SPY", "SHY", ma_symbol, benchmark_symbol} | set(DEFENSIVE_ETFS)
-    backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | set(selected_tickers) | required_strategy_symbols))
-    stock_symbols = tuple(sorted(get_all_stock_symbols()))
+    backtest_symbols = tuple(sorted(set(get_all_etf_symbols()) | required_strategy_symbols))
+    stock_universe_table = load_stock_universe_table()
+    stock_symbols = tuple(sorted(stock_universe_table["Ticker"].drop_duplicates().tolist()))
 
     with st.spinner("Downloading cached daily OHLCV ETF data..."):
         backtest_ohlcv = load_backtest_ohlcv_data(
@@ -3084,8 +3218,13 @@ def main():
         return
 
     backtest_close = backtest_ohlcv["close"].copy()
-    with st.spinner("Downloading cached daily stock data..."):
-        stock_close = load_close_data(
+    st.caption(
+        f"Stock universe loaded from "
+        f"{STOCK_UNIVERSE_FILE.name if STOCK_UNIVERSE_FILE.exists() else 'built-in fallback'} "
+        f"with {len(stock_symbols)} tickers. Stock prices use an incremental local cache."
+    )
+    with st.spinner("Loading daily stock data from incremental cache..."):
+        stock_close = load_incremental_stock_close_data(
             stock_symbols,
             backtest_start.strftime("%Y-%m-%d"),
             backtest_end.strftime("%Y-%m-%d"),

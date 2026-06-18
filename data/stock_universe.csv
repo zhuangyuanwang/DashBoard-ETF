@@ -1,0 +1,301 @@
+Ticker,Sector,Industry,Category
+AAPL,Information Technology,Consumer Electronics,Technology / Growth
+MSFT,Information Technology,Software,Technology / Growth
+NVDA,Information Technology,Semiconductors,Technology / Growth
+AVGO,Information Technology,Semiconductors,Technology / Growth
+AMD,Information Technology,Semiconductors,Technology / Growth
+ORCL,Information Technology,Software,Technology / Growth
+CRM,Information Technology,Software,Technology / Growth
+ADBE,Information Technology,Software,Technology / Growth
+CSCO,Information Technology,Communications Equipment,Technology / Growth
+IBM,Information Technology,IT Services,Technology / Growth
+INTU,Information Technology,Software,Technology / Growth
+TXN,Information Technology,Semiconductors,Technology / Growth
+QCOM,Information Technology,Semiconductors,Technology / Growth
+AMAT,Information Technology,Semiconductor Equipment,Technology / Growth
+MU,Information Technology,Semiconductors,Technology / Growth
+LRCX,Information Technology,Semiconductor Equipment,Technology / Growth
+KLAC,Information Technology,Semiconductor Equipment,Technology / Growth
+ADI,Information Technology,Semiconductors,Technology / Growth
+MCHP,Information Technology,Semiconductors,Technology / Growth
+MRVL,Information Technology,Semiconductors,Technology / Growth
+PANW,Information Technology,Cybersecurity,Technology / Growth
+NOW,Information Technology,Software,Technology / Growth
+SNPS,Information Technology,Software,Technology / Growth
+CDNS,Information Technology,Software,Technology / Growth
+CRWD,Information Technology,Cybersecurity,Technology / Growth
+PLTR,Information Technology,Software,Technology / Growth
+ANET,Information Technology,Networking,Technology / Growth
+MSI,Information Technology,Communications Equipment,Technology / Growth
+FTNT,Information Technology,Cybersecurity,Technology / Growth
+ZS,Information Technology,Cybersecurity,Technology / Growth
+DDOG,Information Technology,Software,Technology / Growth
+NET,Information Technology,Cloud Infrastructure,Technology / Growth
+MDB,Information Technology,Software,Technology / Growth
+SNOW,Information Technology,Software,Technology / Growth
+WDAY,Information Technology,Software,Technology / Growth
+ADSK,Information Technology,Software,Technology / Growth
+ROP,Information Technology,Software,Technology / Growth
+FICO,Information Technology,Analytics Software,Technology / Growth
+GDDY,Information Technology,Internet Services,Technology / Growth
+HPE,Information Technology,Hardware,Technology / Growth
+DELL,Information Technology,Hardware,Technology / Growth
+HPQ,Information Technology,Hardware,Technology / Growth
+GLW,Information Technology,Electronic Components,Technology / Growth
+TEL,Information Technology,Electronic Components,Technology / Growth
+APH,Information Technology,Electronic Components,Technology / Growth
+ON,Information Technology,Semiconductors,Technology / Growth
+MPWR,Information Technology,Semiconductors,Technology / Growth
+NXPI,Information Technology,Semiconductors,Technology / Growth
+SWKS,Information Technology,Semiconductors,Technology / Growth
+ENPH,Information Technology,Solar Technology,Technology / Growth
+FSLR,Information Technology,Solar Technology,Technology / Growth
+AKAM,Information Technology,Internet Services,Technology / Growth
+PTC,Information Technology,Software,Technology / Growth
+KEYS,Information Technology,Electronic Equipment,Technology / Growth
+TER,Information Technology,Semiconductor Equipment,Technology / Growth
+CDW,Information Technology,IT Services,Technology / Growth
+TYL,Information Technology,Software,Technology / Growth
+VRSN,Information Technology,Internet Services,Technology / Growth
+PAYC,Information Technology,Software,Technology / Growth
+APP,Information Technology,Software,Technology / Growth
+JPM,Financials,Banks,Financials
+BAC,Financials,Banks,Financials
+WFC,Financials,Banks,Financials
+GS,Financials,Capital Markets,Financials
+MS,Financials,Capital Markets,Financials
+C,Financials,Banks,Financials
+V,Financials,Payments,Financials
+MA,Financials,Payments,Financials
+AXP,Financials,Consumer Finance,Financials
+BLK,Financials,Asset Management,Financials
+SCHW,Financials,Brokerage,Financials
+PNC,Financials,Banks,Financials
+USB,Financials,Banks,Financials
+TFC,Financials,Banks,Financials
+COF,Financials,Consumer Finance,Financials
+BK,Financials,Custody Banks,Financials
+STT,Financials,Custody Banks,Financials
+MET,Financials,Insurance,Financials
+PRU,Financials,Insurance,Financials
+AFL,Financials,Insurance,Financials
+ALL,Financials,Insurance,Financials
+TRV,Financials,Insurance,Financials
+CB,Financials,Insurance,Financials
+MMC,Financials,Insurance Brokers,Financials
+AON,Financials,Insurance Brokers,Financials
+AJG,Financials,Insurance Brokers,Financials
+SPGI,Financials,Financial Data,Financials
+MCO,Financials,Financial Data,Financials
+ICE,Financials,Exchanges,Financials
+CME,Financials,Exchanges,Financials
+CBOE,Financials,Exchanges,Financials
+NDAQ,Financials,Exchanges,Financials
+AIG,Financials,Insurance,Financials
+AMP,Financials,Asset Management,Financials
+TROW,Financials,Asset Management,Financials
+RJF,Financials,Capital Markets,Financials
+FITB,Financials,Banks,Financials
+MTB,Financials,Banks,Financials
+HBAN,Financials,Banks,Financials
+RF,Financials,Banks,Financials
+CFG,Financials,Banks,Financials
+SYF,Financials,Consumer Finance,Financials
+DFS,Financials,Consumer Finance,Financials
+BRO,Financials,Insurance Brokers,Financials
+WRB,Financials,Insurance,Financials
+PFG,Financials,Insurance,Financials
+LNC,Financials,Insurance,Financials
+ACGL,Financials,Insurance,Financials
+EG,Financials,Reinsurance,Financials
+WTW,Financials,Insurance Brokers,Financials
+XOM,Energy,Integrated Oil & Gas,Energy / Inflation
+CVX,Energy,Integrated Oil & Gas,Energy / Inflation
+COP,Energy,Exploration & Production,Energy / Inflation
+EOG,Energy,Exploration & Production,Energy / Inflation
+SLB,Energy,Oilfield Services,Energy / Inflation
+MPC,Energy,Refining,Energy / Inflation
+PSX,Energy,Refining,Energy / Inflation
+VLO,Energy,Refining,Energy / Inflation
+OXY,Energy,Exploration & Production,Energy / Inflation
+WMB,Energy,Midstream,Energy / Inflation
+KMI,Energy,Midstream,Energy / Inflation
+LNG,Energy,LNG Infrastructure,Energy / Inflation
+TRGP,Energy,Midstream,Energy / Inflation
+HES,Energy,Exploration & Production,Energy / Inflation
+DVN,Energy,Exploration & Production,Energy / Inflation
+FANG,Energy,Exploration & Production,Energy / Inflation
+HAL,Energy,Oilfield Services,Energy / Inflation
+BKR,Energy,Oilfield Services,Energy / Inflation
+EQT,Energy,Natural Gas,Energy / Inflation
+CTRA,Energy,Exploration & Production,Energy / Inflation
+APA,Energy,Exploration & Production,Energy / Inflation
+OVV,Energy,Exploration & Production,Energy / Inflation
+PR,Energy,Exploration & Production,Energy / Inflation
+AR,Energy,Natural Gas,Energy / Inflation
+CNX,Energy,Natural Gas,Energy / Inflation
+JNJ,Health Care,Pharmaceuticals,Defensive
+PG,Consumer Staples,Household Products,Defensive
+KO,Consumer Staples,Beverages,Defensive
+PEP,Consumer Staples,Beverages,Defensive
+WMT,Consumer Staples,Retail,Defensive
+COST,Consumer Staples,Retail,Defensive
+MCD,Consumer Discretionary,Restaurants,Defensive
+MRK,Health Care,Pharmaceuticals,Defensive
+ABBV,Health Care,Pharmaceuticals,Defensive
+LLY,Health Care,Pharmaceuticals,Defensive
+PFE,Health Care,Pharmaceuticals,Defensive
+BMY,Health Care,Pharmaceuticals,Defensive
+AMGN,Health Care,Biotechnology,Defensive
+GILD,Health Care,Biotechnology,Defensive
+TMO,Health Care,Life Sciences Tools,Defensive
+ABT,Health Care,Medical Devices,Defensive
+MDT,Health Care,Medical Devices,Defensive
+ISRG,Health Care,Medical Devices,Defensive
+SYK,Health Care,Medical Devices,Defensive
+BSX,Health Care,Medical Devices,Defensive
+ZTS,Health Care,Animal Health,Defensive
+EL,Consumer Staples,Personal Products,Defensive
+CL,Consumer Staples,Household Products,Defensive
+KMB,Consumer Staples,Household Products,Defensive
+GIS,Consumer Staples,Packaged Foods,Defensive
+HSY,Consumer Staples,Packaged Foods,Defensive
+KHC,Consumer Staples,Packaged Foods,Defensive
+MDLZ,Consumer Staples,Packaged Foods,Defensive
+CPB,Consumer Staples,Packaged Foods,Defensive
+SJM,Consumer Staples,Packaged Foods,Defensive
+KR,Consumer Staples,Retail,Defensive
+DG,Consumer Staples,Retail,Defensive
+DLTR,Consumer Staples,Retail,Defensive
+TGT,Consumer Staples,Retail,Defensive
+CVS,Health Care,Health Care Services,Defensive
+CI,Health Care,Managed Care,Defensive
+HUM,Health Care,Managed Care,Defensive
+UNH,Health Care,Managed Care,Defensive
+CNC,Health Care,Managed Care,Defensive
+MO,Consumer Staples,Tobacco,Defensive
+PM,Consumer Staples,Tobacco,Defensive
+ED,Utilities,Electric Utilities,Defensive
+SO,Utilities,Electric Utilities,Defensive
+DUK,Utilities,Electric Utilities,Defensive
+NEE,Utilities,Electric Utilities,Defensive
+AEP,Utilities,Electric Utilities,Defensive
+XEL,Utilities,Electric Utilities,Defensive
+PEG,Utilities,Electric Utilities,Defensive
+WEC,Utilities,Electric Utilities,Defensive
+AWK,Utilities,Water Utilities,Defensive
+D,Utilities,Multi Utilities,Defensive
+CAT,Industrials,Machinery,Industrials
+GE,Industrials,Aerospace & Defense,Industrials
+HON,Industrials,Industrial Conglomerates,Industrials
+BA,Industrials,Aerospace & Defense,Industrials
+LMT,Industrials,Aerospace & Defense,Industrials
+RTX,Industrials,Aerospace & Defense,Industrials
+GD,Industrials,Aerospace & Defense,Industrials
+NOC,Industrials,Aerospace & Defense,Industrials
+DE,Industrials,Machinery,Industrials
+UPS,Industrials,Air Freight & Logistics,Industrials
+FDX,Industrials,Air Freight & Logistics,Industrials
+UNP,Industrials,Railroads,Industrials
+CSX,Industrials,Railroads,Industrials
+NSC,Industrials,Railroads,Industrials
+WM,Industrials,Environmental Services,Industrials
+RSG,Industrials,Environmental Services,Industrials
+ETN,Industrials,Electrical Equipment,Industrials
+EMR,Industrials,Electrical Equipment,Industrials
+PH,Industrials,Machinery,Industrials
+MMM,Industrials,Industrial Conglomerates,Industrials
+ITW,Industrials,Machinery,Industrials
+DOV,Industrials,Machinery,Industrials
+ROK,Industrials,Electrical Equipment,Industrials
+CMI,Industrials,Machinery,Industrials
+PCAR,Industrials,Machinery,Industrials
+ODFL,Industrials,Trucking,Industrials
+URI,Industrials,Trading Companies,Industrials
+PWR,Industrials,Construction & Engineering,Industrials
+TT,Industrials,Building Products,Industrials
+JCI,Industrials,Building Products,Industrials
+CARR,Industrials,Building Products,Industrials
+OTIS,Industrials,Building Products,Industrials
+IR,Industrials,Machinery,Industrials
+FAST,Industrials,Trading Companies,Industrials
+GWW,Industrials,Trading Companies,Industrials
+XYL,Industrials,Machinery,Industrials
+AME,Industrials,Electrical Equipment,Industrials
+GNRC,Industrials,Electrical Equipment,Industrials
+TXT,Industrials,Aerospace & Defense,Industrials
+HWM,Industrials,Aerospace & Defense,Industrials
+TDG,Industrials,Aerospace & Defense,Industrials
+HEI,Industrials,Aerospace & Defense,Industrials
+LHX,Industrials,Aerospace & Defense,Industrials
+TDY,Industrials,Electronic Equipment,Industrials
+AXON,Industrials,Security Equipment,Industrials
+EXPD,Industrials,Air Freight & Logistics,Industrials
+CHRW,Industrials,Air Freight & Logistics,Industrials
+JBHT,Industrials,Trucking,Industrials
+HUBB,Industrials,Electrical Equipment,Industrials
+PAYX,Industrials,Human Capital Services,Industrials
+AMZN,Consumer Discretionary,E-Commerce,Consumer / Communication
+META,Communication Services,Social Media,Consumer / Communication
+GOOGL,Communication Services,Internet Media,Consumer / Communication
+GOOG,Communication Services,Internet Media,Consumer / Communication
+NFLX,Communication Services,Streaming,Consumer / Communication
+DIS,Communication Services,Entertainment,Consumer / Communication
+TSLA,Consumer Discretionary,Automobiles,Consumer / Communication
+HD,Consumer Discretionary,Home Improvement Retail,Consumer / Communication
+LOW,Consumer Discretionary,Home Improvement Retail,Consumer / Communication
+NKE,Consumer Discretionary,Apparel,Consumer / Communication
+SBUX,Consumer Discretionary,Restaurants,Consumer / Communication
+CMG,Consumer Discretionary,Restaurants,Consumer / Communication
+BKNG,Consumer Discretionary,Travel,Consumer / Communication
+ABNB,Consumer Discretionary,Travel,Consumer / Communication
+MAR,Consumer Discretionary,Hotels,Consumer / Communication
+HLT,Consumer Discretionary,Hotels,Consumer / Communication
+RCL,Consumer Discretionary,Cruise Lines,Consumer / Communication
+CCL,Consumer Discretionary,Cruise Lines,Consumer / Communication
+TJX,Consumer Discretionary,Apparel Retail,Consumer / Communication
+ROST,Consumer Discretionary,Apparel Retail,Consumer / Communication
+ORLY,Consumer Discretionary,Auto Parts Retail,Consumer / Communication
+AZO,Consumer Discretionary,Auto Parts Retail,Consumer / Communication
+KMX,Consumer Discretionary,Auto Retail,Consumer / Communication
+GM,Consumer Discretionary,Automobiles,Consumer / Communication
+F,Consumer Discretionary,Automobiles,Consumer / Communication
+TPR,Consumer Discretionary,Luxury Goods,Consumer / Communication
+RL,Consumer Discretionary,Luxury Goods,Consumer / Communication
+DECK,Consumer Discretionary,Apparel,Consumer / Communication
+LULU,Consumer Discretionary,Apparel,Consumer / Communication
+ULTA,Consumer Discretionary,Specialty Retail,Consumer / Communication
+BBY,Consumer Discretionary,Electronics Retail,Consumer / Communication
+EBAY,Consumer Discretionary,E-Commerce,Consumer / Communication
+ETSY,Consumer Discretionary,E-Commerce,Consumer / Communication
+YUM,Consumer Discretionary,Restaurants,Consumer / Communication
+DPZ,Consumer Discretionary,Restaurants,Consumer / Communication
+DRI,Consumer Discretionary,Restaurants,Consumer / Communication
+WBD,Communication Services,Entertainment,Consumer / Communication
+FOXA,Communication Services,Media,Consumer / Communication
+FOX,Communication Services,Media,Consumer / Communication
+TMUS,Communication Services,Wireless Telecom,Consumer / Communication
+VZ,Communication Services,Telecom,Consumer / Communication
+T,Communication Services,Telecom,Consumer / Communication
+CHTR,Communication Services,Cable,Consumer / Communication
+CMCSA,Communication Services,Cable,Consumer / Communication
+EA,Communication Services,Video Games,Consumer / Communication
+TTWO,Communication Services,Video Games,Consumer / Communication
+LYV,Communication Services,Entertainment,Consumer / Communication
+SPOT,Communication Services,Streaming,Consumer / Communication
+RDDT,Communication Services,Social Media,Consumer / Communication
+PINS,Communication Services,Social Media,Consumer / Communication
+SNAP,Communication Services,Social Media,Consumer / Communication
+LIN,Materials,Industrial Gases,Energy / Inflation
+APD,Materials,Industrial Gases,Energy / Inflation
+SHW,Materials,Specialty Chemicals,Industrials
+FCX,Materials,Copper Mining,Energy / Inflation
+NEM,Materials,Gold Mining,Energy / Inflation
+NUE,Materials,Steel,Industrials
+VMC,Materials,Construction Materials,Industrials
+MLM,Materials,Construction Materials,Industrials
+ECL,Materials,Specialty Chemicals,Defensive
+PPG,Materials,Specialty Chemicals,Industrials
+DOW,Materials,Chemicals,Energy / Inflation
+DD,Materials,Specialty Chemicals,Industrials
+ALB,Materials,Specialty Chemicals,Energy / Inflation
