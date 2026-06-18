@@ -1685,7 +1685,10 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
         ),
         axis=1,
     )
-    return raw.sort_values("Stock Score", ascending=False).head(top_n)
+    ranked = raw.sort_values("Stock Score", ascending=False).reset_index(drop=True)
+    if top_n is None:
+        return ranked
+    return ranked.head(top_n)
 
 
 def normalize_series(values):
@@ -1911,29 +1914,76 @@ def constrain_position_table(position_rows, initial_capital, max_position_weight
     ].reset_index(drop=True)
 
 
-def build_unified_portfolio_allocation(asset_ranking, asset_targets, initial_capital, max_position_weight=0.10, max_sector_exposure=0.35):
+def build_unified_portfolio_allocation(
+    asset_ranking,
+    asset_targets,
+    initial_capital,
+    max_position_weight=0.10,
+    max_sector_exposure=0.35,
+    stock_satellite_count=10,
+    stock_core_share=0.40,
+):
     if asset_ranking.empty:
         return constrain_position_table([], initial_capital, max_position_weight, max_sector_exposure)
 
     position_rows = []
-    for asset_type, target_key in [("ETF", "ETFs"), ("Stock", "Stocks")]:
-        budget = asset_targets.get(target_key, 0.0)
-        candidates = asset_ranking[(asset_ranking["Asset Type"] == asset_type) & (asset_ranking["Final Score"] > 0)].copy()
-        if budget <= 0 or candidates.empty:
-            continue
-        score_weights = candidates["Final Score"] / candidates["Final Score"].sum()
-        for idx, row in candidates.iterrows():
+    etf_budget = asset_targets.get("ETFs", 0.0)
+    etf_candidates = asset_ranking[(asset_ranking["Asset Type"] == "ETF") & (asset_ranking["Final Score"] > 0)].copy()
+    if etf_budget > 0 and not etf_candidates.empty:
+        etf_score_weights = etf_candidates["Final Score"] / etf_candidates["Final Score"].sum()
+        for idx, row in etf_candidates.iterrows():
             position_rows.append(
                 {
                     "Ticker": row["Ticker"],
-                    "Asset Type": asset_type,
-                    "Source": "Unified Ranking Engine",
+                    "Asset Type": "ETF",
+                    "Source": "ETF Unified Ranking Engine",
                     "Sector/Category": row.get("Category", "Other"),
-                    "Portfolio Weight": budget * score_weights.loc[idx],
+                    "Portfolio Weight": etf_budget * etf_score_weights.loc[idx],
                     "Signal": "BUY",
-                    "Reason": row.get("Reason", "Selected by unified asset ranking score."),
+                    "Reason": row.get("Reason", "Selected by ETF unified asset ranking score."),
                 }
             )
+
+    stock_budget = asset_targets.get("Stocks", 0.0)
+    stock_candidates = asset_ranking[(asset_ranking["Asset Type"] == "Stock") & (asset_ranking["Final Score"] > 0)].copy()
+    if stock_budget > 0 and not stock_candidates.empty:
+        stock_core_share = min(max(stock_core_share, 0.0), 1.0)
+        core_budget = stock_budget * stock_core_share
+        satellite_budget = stock_budget - core_budget
+
+        core_scores = stock_candidates["Final Score"].clip(lower=0.01)
+        core_weights = core_scores / core_scores.sum()
+        for idx, row in stock_candidates.iterrows():
+            position_rows.append(
+                {
+                    "Ticker": row["Ticker"],
+                    "Asset Type": "Stock",
+                    "Source": "Stock Core Basket",
+                    "Sector/Category": row.get("Category", "Other"),
+                    "Portfolio Weight": core_budget * core_weights.loc[idx],
+                    "Signal": "CORE",
+                    "Reason": "Included in the diversified 300-stock core basket with a light score tilt.",
+                }
+            )
+
+        satellite_candidates = stock_candidates.head(stock_satellite_count).copy()
+        if satellite_budget > 0 and not satellite_candidates.empty:
+            satellite_weights = satellite_candidates["Final Score"] / satellite_candidates["Final Score"].sum()
+            for idx, row in satellite_candidates.iterrows():
+                position_rows.append(
+                    {
+                        "Ticker": row["Ticker"],
+                        "Asset Type": "Stock",
+                        "Source": "Stock Satellite Strategy",
+                        "Sector/Category": row.get("Category", "Other"),
+                        "Portfolio Weight": satellite_budget * satellite_weights.loc[idx],
+                        "Signal": "OVERWEIGHT",
+                        "Reason": (
+                            row.get("Reason", "Selected by stock ranking score.")
+                            + " It receives satellite overweight because it is among the top-ranked stocks."
+                        ),
+                    }
+                )
 
     cash_budget = asset_targets.get("Cash / SHY / BIL", 0.0)
     if cash_budget > 0:
@@ -2518,7 +2568,8 @@ def render_regime_aware_portfolio_overview(
     st.subheader("Recommended Portfolio")
     st.caption(
         "These are final position-level holdings generated by the unified ETF + stock ranking engine, "
-        "then adjusted for cash, position limits, and sector/category concentration."
+        "then adjusted for cash, position limits, and sector/category concentration. "
+        "For stocks, the default construction is Core-Satellite: broad stock-universe core exposure plus satellite overweight to top-ranked names."
     )
     st.dataframe(
         position_allocation.style.format({"Portfolio Weight": "{:.2%}", "Dollar Allocation": "${:,.0f}"}),
@@ -2601,6 +2652,11 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
     ranking = asset_ranking.copy()
     ranking["Assigned Portfolio Weight"] = ranking["Ticker"].map(weight_map).fillna(0.0)
     ranking["Dollar Allocation"] = ranking["Assigned Portfolio Weight"] * initial_capital
+    if (ranking["Asset Type"] == "Stock").any():
+        st.info(
+            "Stock portfolio construction uses a Core-Satellite strategy: all stocks in the universe receive diversified core exposure, "
+            "while the top-ranked stocks receive additional satellite overweight."
+        )
     st.subheader("Unified Ranked Candidates")
     display_cols = [
         "Ticker",
@@ -3267,7 +3323,7 @@ def main():
     elif portfolio_mode == "Stock-only":
         cash_target = max(0.10 if enable_cash_allocation else 0.0, risk_off_cash_min if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"] else 0.0)
         asset_targets = {"ETFs": 0.0, "Stocks": 1 - cash_target, "Cash / SHY / BIL": cash_target}
-    stock_selection = calculate_stock_selection(stock_close, benchmark_close, regime, top_n=top_n_stocks)
+    stock_selection = calculate_stock_selection(stock_close, benchmark_close, regime, top_n=None)
     asset_ranking = build_unified_asset_ranking(backtest_close, stock_selection, strategy_allocation, regime)
     if not asset_ranking.empty:
         if portfolio_mode == "ETF-only":
@@ -3280,6 +3336,8 @@ def main():
         initial_portfolio_value,
         max_position_weight=max_position_weight,
         max_sector_exposure=max_sector_exposure,
+        stock_satellite_count=top_n_stocks,
+        stock_core_share=0.40,
     )
     if not stock_selection.empty:
         stock_weight_map = position_allocation[position_allocation["Asset Type"] == "Stock"].set_index("Ticker")["Portfolio Weight"]
