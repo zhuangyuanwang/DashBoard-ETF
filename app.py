@@ -42,6 +42,12 @@ STRATEGY_TYPES = [
     "Breakout Strategy",
     "Mean Reversion Strategy",
     "Volatility Target Strategy",
+    "Sector Leadership Strategy",
+    "Risk Parity Rotation Strategy",
+    "Commodity Inflation Hedge Strategy",
+    "International Relative Strength Strategy",
+    "Credit Risk Premium Strategy",
+    "Quality Defensive Blend Strategy",
 ]
 
 DEFENSIVE_ETFS = ["TLT", "IEF", "GLD", "SHY", "XLV", "XLU"]
@@ -137,6 +143,47 @@ STRATEGY_REGIME_SUITABILITY = {
         "High Volatility / Crisis": "high",
         "Risk-Off Bear Market": "high",
         "Sideways / Choppy Market": "medium",
+        "Risk-On Bull Market": "medium",
+    },
+    "Sector Leadership Strategy": {
+        "Risk-On Bull Market": "high",
+        "Growth-Led Market": "high",
+        "Value / Financials-Led Market": "medium",
+        "Inflation / Commodity-Led Market": "medium",
+        "Sideways / Choppy Market": "low",
+    },
+    "Risk Parity Rotation Strategy": {
+        "Sideways / Choppy Market": "high",
+        "Risk-Off Bear Market": "medium",
+        "High Volatility / Crisis": "medium",
+        "Falling Rates / Bond Rally": "medium",
+        "Risk-On Bull Market": "medium",
+    },
+    "Commodity Inflation Hedge Strategy": {
+        "Inflation / Commodity-Led Market": "high",
+        "High Volatility / Crisis": "medium",
+        "Sideways / Choppy Market": "medium",
+        "Risk-On Bull Market": "low",
+    },
+    "International Relative Strength Strategy": {
+        "Risk-On Bull Market": "medium",
+        "Growth-Led Market": "medium",
+        "Value / Financials-Led Market": "medium",
+        "Sideways / Choppy Market": "low",
+        "Risk-Off Bear Market": "low",
+    },
+    "Credit Risk Premium Strategy": {
+        "Risk-On Bull Market": "medium",
+        "Sideways / Choppy Market": "medium",
+        "Falling Rates / Bond Rally": "medium",
+        "Risk-Off Bear Market": "low",
+        "High Volatility / Crisis": "low",
+    },
+    "Quality Defensive Blend Strategy": {
+        "Risk-Off Bear Market": "high",
+        "High Volatility / Crisis": "high",
+        "Sideways / Choppy Market": "high",
+        "Falling Rates / Bond Rally": "medium",
         "Risk-On Bull Market": "medium",
     },
 }
@@ -821,6 +868,110 @@ def generate_strategy_signal(strategy_type, close, ma_symbol="SPY"):
             return make_signal(strategy_type, signal_date, "SHY", "RISK-OFF", max(50, strength), reason, -1)
         reason = "HOLD signal because volatility is near the target range."
         return make_signal(strategy_type, signal_date, "SPY", "HOLD", max(25, 100 - strength), reason, 0)
+
+    if strategy_type == "Sector Leadership Strategy":
+        sector_symbols = available_symbols(close, ["XLK", "XLF", "XLE", "XLV", "XLP", "XLY", "XLI", "XLU"])
+        if not sector_symbols:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "No sector ETFs are available.", -1)
+        momentum_scores = calculate_momentum_scores(indicators)
+        latest_scores = momentum_scores[sector_symbols].iloc[-1].dropna().sort_values(ascending=False) if not momentum_scores.empty else pd.Series(dtype=float)
+        if latest_scores.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough sector ETF history for leadership ranking.", -1)
+        selected = latest_scores.index[0]
+        top_score = latest_scores.iloc[0]
+        second_score = latest_scores.iloc[1] if len(latest_scores) > 1 else 0.0
+        strength = 50 + min(50, max(0, (top_score - second_score) * 500))
+        signal = "BUY" if top_score > 0 else "HOLD"
+        vote = 1 if signal == "BUY" else 0
+        reason = f"Selected {selected} because it has the strongest weighted momentum among sector ETFs."
+        return make_signal(strategy_type, signal_date, selected, signal, strength, reason, vote)
+
+    if strategy_type == "Risk Parity Rotation Strategy":
+        candidates = available_symbols(close, ["SPY", "TLT", "IEF", "GLD", "DBC", "AGG"])
+        if len(candidates) < 2:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough cross-asset ETFs are available for risk parity rotation.", -1)
+        latest_vol = indicators["vol60"][candidates].iloc[-1].dropna()
+        latest_return = indicators["returns_3m"][candidates].iloc[-1].dropna()
+        valid = latest_vol.index.intersection(latest_return.index)
+        if len(valid) < 2:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough volatility and momentum history for risk parity rotation.", -1)
+        score = latest_return[valid].rank(pct=True) * 0.45 + (-latest_vol[valid]).rank(pct=True) * 0.55
+        selected_assets = score.sort_values(ascending=False).head(min(3, len(score))).index.tolist()
+        positive_count = int((latest_return[selected_assets] > 0).sum())
+        strength = 40 + positive_count / max(1, len(selected_assets)) * 60
+        signal = "BUY" if positive_count >= max(1, len(selected_assets) - 1) else "HOLD"
+        reason = f"Selected {', '.join(selected_assets)} using a cross-asset blend of lower volatility and positive 3-month return."
+        return make_signal(strategy_type, signal_date, ", ".join(selected_assets), signal, strength, reason, 1 if signal == "BUY" else 0)
+
+    if strategy_type == "Commodity Inflation Hedge Strategy":
+        commodity_symbols = available_symbols(close, ["DBC", "GLD", "SLV", "USO", "XLE", "TIP"])
+        if not commodity_symbols:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "No commodity or inflation hedge ETFs are available.", -1)
+        latest_return = indicators["returns_3m"][commodity_symbols].iloc[-1].dropna()
+        if latest_return.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history to rank commodity and inflation hedge ETFs.", -1)
+        selected_assets = latest_return.sort_values(ascending=False).head(min(2, len(latest_return))).index.tolist()
+        avg_return = latest_return[selected_assets].mean()
+        strength = 50 + min(50, max(0, avg_return * 300))
+        if avg_return > 0:
+            reason = f"Selected {', '.join(selected_assets)} because commodity and inflation hedge ETFs have positive 3-month leadership."
+            return make_signal(strategy_type, signal_date, ", ".join(selected_assets), "BUY", strength, reason, 1)
+        defensive_asset = "SHY" if "SHY" in close.columns else "Cash"
+        reason = "Moved defensive because commodity and inflation hedge ETFs do not have positive 3-month momentum."
+        return make_signal(strategy_type, signal_date, defensive_asset, "RISK-OFF", max(25, 100 - strength), reason, -1)
+
+    if strategy_type == "International Relative Strength Strategy":
+        international_symbols = available_symbols(close, ["EFA", "EEM"])
+        if "SPY" not in close.columns or not international_symbols:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "SPY and international ETF data are required.", -1)
+        intl_returns = indicators["returns_3m"][international_symbols].iloc[-1].dropna()
+        spy_return = indicators["returns_3m"]["SPY"].dropna()
+        if intl_returns.empty or spy_return.empty:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history for international relative strength.", -1)
+        spy_3m = spy_return.iloc[-1]
+        relative = (intl_returns - spy_3m).sort_values(ascending=False)
+        selected = relative.index[0]
+        strength = 50 + min(50, max(0, relative.iloc[0] * 400))
+        if relative.iloc[0] > 0 and intl_returns[selected] > 0:
+            reason = f"Selected {selected} because it has positive absolute momentum and is outperforming SPY over 3 months."
+            return make_signal(strategy_type, signal_date, selected, "BUY", strength, reason, 1)
+        reason = "Held SPY because international ETFs are not outperforming SPY with positive momentum."
+        return make_signal(strategy_type, signal_date, "SPY", "HOLD", 40, reason, 0)
+
+    if strategy_type == "Credit Risk Premium Strategy":
+        credit_symbols = available_symbols(close, ["HYG", "LQD", "AGG", "TIP", "SHY"])
+        if len(credit_symbols) < 2:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough credit or bond ETFs are available.", -1)
+        latest_return = indicators["returns_3m"][credit_symbols].iloc[-1].dropna()
+        latest_vol = indicators["vol60"][credit_symbols].iloc[-1].dropna()
+        valid = latest_return.index.intersection(latest_vol.index)
+        if len(valid) < 2:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough credit ETF return and volatility history.", -1)
+        score = latest_return[valid].rank(pct=True) * 0.60 + (-latest_vol[valid]).rank(pct=True) * 0.40
+        selected = score.sort_values(ascending=False).index[0]
+        strength = 50 + min(50, max(0, latest_return[selected] * 300))
+        if selected == "SHY" or latest_return[selected] <= 0:
+            reason = "Moved risk-off because credit ETFs do not have positive risk-adjusted momentum."
+            return make_signal(strategy_type, signal_date, "SHY" if "SHY" in close.columns else selected, "RISK-OFF", max(25, 100 - strength), reason, -1)
+        reason = f"Selected {selected} because it has the strongest risk-adjusted credit/bond momentum."
+        return make_signal(strategy_type, signal_date, selected, "BUY", strength, reason, 1)
+
+    if strategy_type == "Quality Defensive Blend Strategy":
+        quality_symbols = available_symbols(close, ["USMV", "SPLV", "XLV", "XLP", "XLU", "IEF", "SHY"])
+        if not quality_symbols:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "No quality defensive ETFs are available.", -1)
+        latest_return = indicators["returns_3m"][quality_symbols].iloc[-1].dropna()
+        latest_vol = indicators["vol60"][quality_symbols].iloc[-1].dropna()
+        valid = latest_return.index.intersection(latest_vol.index)
+        if len(valid) == 0:
+            return make_signal(strategy_type, signal_date, "Cash", "CASH", 0, "Not enough history for quality defensive blend ranking.", -1)
+        score = latest_return[valid].rank(pct=True) * 0.40 + (-latest_vol[valid]).rank(pct=True) * 0.60
+        selected_assets = score.sort_values(ascending=False).head(min(3, len(score))).index.tolist()
+        avg_return = latest_return[selected_assets].mean()
+        strength = 50 + min(50, max(0, avg_return * 300))
+        signal = "BUY" if avg_return > 0 else "HOLD"
+        reason = f"Selected {', '.join(selected_assets)} because they rank well on defensive volatility and positive momentum."
+        return make_signal(strategy_type, signal_date, ", ".join(selected_assets), signal, strength, reason, 1 if signal == "BUY" else 0)
 
     return make_signal(strategy_type, signal_date, "N/A", "HOLD", 0, "Unknown strategy type.", 0)
 
@@ -1604,14 +1755,30 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     ret20 = stock_close.pct_change(20, fill_method=None).iloc[-1]
     ret60 = stock_close.pct_change(60, fill_method=None).iloc[-1]
     ret120 = stock_close.pct_change(120, fill_method=None).iloc[-1]
+    ret252 = stock_close.pct_change(252, fill_method=None).iloc[-1]
     ma50 = stock_close.rolling(50).mean().iloc[-1]
     ma200 = stock_close.rolling(200).mean().iloc[-1]
+    ma50_vs_ma200 = ma50 / ma200 - 1
+    high_252 = stock_close.rolling(252).max().iloc[-1]
+    high_55_prev = stock_close.rolling(55).max().shift(1).iloc[-1]
     dist_ma50 = stock_close.iloc[-1] / ma50 - 1
     dist_ma200 = stock_close.iloc[-1] / ma200 - 1
     vol20 = returns.rolling(20).std().iloc[-1] * np.sqrt(252)
+    vol60 = returns.rolling(60).std().iloc[-1] * np.sqrt(252)
     drawdown = stock_close.tail(120) / stock_close.tail(120).cummax() - 1
     recent_max_drawdown = drawdown.min()
     relative_strength = ret60 - spy.pct_change(60, fill_method=None).iloc[-1]
+    sector_map = load_stock_universe_table().set_index("Ticker")["Sector"].to_dict()
+    stock_sectors = pd.Series({ticker: sector_map.get(ticker, "Other") for ticker in stock_close.columns})
+    sector_price = stock_close.T.groupby(stock_sectors).mean().T
+    sector_ret60 = sector_price.pct_change(60, fill_method=None).iloc[-1]
+    stock_sector_ret60 = stock_sectors.map(sector_ret60).reindex(stock_close.columns)
+    sector_relative_strength = ret60 - stock_sector_ret60
+    rsi14 = calculate_rsi(stock_close).iloc[-1]
+    latest_price = stock_close.iloc[-1]
+    distance_from_52w_high = latest_price / high_252 - 1
+    breakout_55d = latest_price / high_55_prev - 1
+    pullback_to_ma50 = -abs(latest_price / ma50 - 1)
     beta_window = returns.tail(120)
     spy_beta_window = spy_returns.reindex(beta_window.index).tail(120)
     spy_variance = spy_beta_window.var()
@@ -1627,12 +1794,20 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
             "20D Return": ret20.values,
             "60D Return": ret60.values,
             "120D Return": ret120.values,
+            "252D Return": ret252.values,
             "Distance From MA50": dist_ma50.values,
             "Distance From MA200": dist_ma200.values,
+            "MA50 vs MA200": ma50_vs_ma200.values,
             "Volatility": vol20.values,
+            "60D Volatility": vol60.values,
             "Drawdown": recent_max_drawdown.values,
             "Relative Strength vs SPY": relative_strength.values,
+            "Relative Strength vs Sector": sector_relative_strength.values,
             "Beta vs SPY": beta_vs_spy.values,
+            "RSI14": rsi14.values,
+            "Distance From 52W High": distance_from_52w_high.values,
+            "55D Breakout": breakout_55d.values,
+            "Pullback To MA50 Score Raw": pullback_to_ma50.values,
         }
     ).dropna()
     if raw.empty:
@@ -1643,29 +1818,45 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
         "Uptrend",
         np.where((raw["Distance From MA50"] < 0) & (raw["Distance From MA200"] < 0), "Downtrend", "Mixed"),
     )
-    raw["momentum_score"] = raw["60D Return"].rank(pct=True)
-    raw["relative_strength_score"] = raw["Relative Strength vs SPY"].rank(pct=True)
-    raw["trend_score"] = ((raw["Distance From MA50"] > 0).astype(float) + (raw["Distance From MA200"] > 0).astype(float)) / 2
-    raw["volatility_score"] = (-raw["Volatility"]).rank(pct=True)
-    raw["drawdown_score"] = raw["Drawdown"].rank(pct=True)
-    raw["beta_control_score"] = (-(raw["Beta vs SPY"] - 0.85).abs()).rank(pct=True)
-    raw["quality_momentum_score"] = (
-        0.30 * raw["momentum_score"]
-        + 0.20 * raw["relative_strength_score"]
-        + 0.20 * raw["trend_score"]
-        + 0.15 * raw["volatility_score"]
-        + 0.10 * raw["drawdown_score"]
-        + 0.05 * raw["beta_control_score"]
+    raw["S01 1M Momentum"] = raw["20D Return"].rank(pct=True)
+    raw["S02 3M Momentum"] = raw["60D Return"].rank(pct=True)
+    raw["S03 6M Momentum"] = raw["120D Return"].rank(pct=True)
+    raw["S04 12M Momentum"] = raw["252D Return"].rank(pct=True)
+    raw["S05 Weighted Momentum"] = (
+        0.15 * raw["S01 1M Momentum"]
+        + 0.35 * raw["S02 3M Momentum"]
+        + 0.30 * raw["S03 6M Momentum"]
+        + 0.20 * raw["S04 12M Momentum"]
     )
-    raw["Stock Score"] = (
-        0.25 * raw["momentum_score"]
-        + 0.20 * raw["relative_strength_score"]
-        + 0.15 * raw["trend_score"]
-        + 0.15 * raw["volatility_score"]
-        + 0.10 * raw["drawdown_score"]
-        + 0.10 * raw["beta_control_score"]
-        + 0.05 * raw["quality_momentum_score"]
+    raw["S06 Relative Strength vs SPY"] = raw["Relative Strength vs SPY"].rank(pct=True)
+    raw["S07 Relative Strength vs Sector"] = raw["Relative Strength vs Sector"].rank(pct=True)
+    raw["S08 MA50 Trend"] = (raw["Distance From MA50"] > 0).astype(float)
+    raw["S09 MA200 Trend"] = (raw["Distance From MA200"] > 0).astype(float)
+    raw["S10 Golden Cross Trend"] = ((raw["MA50 vs MA200"] > 0) & (raw["Distance From MA200"] > 0)).astype(float)
+    raw["S11 52W High Proximity"] = raw["Distance From 52W High"].rank(pct=True)
+    raw["S12 55D Breakout"] = raw["55D Breakout"].rank(pct=True)
+    raw["S13 Low Volatility 20D"] = (-raw["Volatility"]).rank(pct=True)
+    raw["S14 Low Volatility 60D"] = (-raw["60D Volatility"]).rank(pct=True)
+    raw["S15 Low Drawdown"] = raw["Drawdown"].rank(pct=True)
+    raw["S16 Low Beta"] = (-raw["Beta vs SPY"]).rank(pct=True)
+    raw["S17 Beta Control"] = (-(raw["Beta vs SPY"] - 0.85).abs()).rank(pct=True)
+    raw["S18 RSI Mean Reversion"] = (-(raw["RSI14"] - 45).abs()).rank(pct=True)
+    raw["S19 Pullback In Uptrend"] = (
+        raw["Pullback To MA50 Score Raw"].rank(pct=True)
+        * ((raw["Distance From MA200"] > 0).astype(float))
     )
+    raw["S20 Regime Fit"] = raw["Category"].isin(REGIME_STOCK_PREFERENCES.get(regime["regime_name"], [])).astype(float)
+
+    stock_strategy_columns = [column for column in raw.columns if column.startswith("S") and column[1:3].isdigit()]
+    raw["momentum_score"] = raw["S05 Weighted Momentum"]
+    raw["relative_strength_score"] = (raw["S06 Relative Strength vs SPY"] + raw["S07 Relative Strength vs Sector"]) / 2
+    raw["trend_score"] = (raw["S08 MA50 Trend"] + raw["S09 MA200 Trend"] + raw["S10 Golden Cross Trend"]) / 3
+    raw["volatility_score"] = (raw["S13 Low Volatility 20D"] + raw["S14 Low Volatility 60D"]) / 2
+    raw["drawdown_score"] = raw["S15 Low Drawdown"]
+    raw["beta_control_score"] = raw["S17 Beta Control"]
+    raw["quality_momentum_score"] = raw[stock_strategy_columns].mean(axis=1)
+    raw["Stock Strategy Support"] = (raw[stock_strategy_columns] >= 0.70).sum(axis=1)
+    raw["Stock Score"] = raw[stock_strategy_columns].mean(axis=1)
     preferred = REGIME_STOCK_PREFERENCES.get(regime["regime_name"], [])
     raw["Regime Preference Boost"] = raw["Category"].isin(preferred).astype(float) * 0.15
     if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"]:
@@ -1796,7 +1987,7 @@ def build_unified_asset_ranking(etf_close, stock_selection, strategy_allocation,
         stock_rank = stock_selection.copy()
         stock_rank["Asset Type"] = "Stock"
         stock_rank["Final Score"] = normalize_series(stock_rank["Stock Score"]).values
-        stock_rank["Score Source"] = "Stock Market Score"
+        stock_rank["Score Source"] = "20-Strategy Stock Score"
         stock_rank["Momentum Score"] = stock_rank.get("momentum_score", np.nan)
         stock_rank["Relative Strength Score"] = stock_rank.get("relative_strength_score", np.nan)
         stock_rank["Trend Score"] = stock_rank.get("trend_score", np.nan)
@@ -1822,6 +2013,7 @@ def build_unified_asset_ranking(etf_close, stock_selection, strategy_allocation,
         "Trend Score",
         "Volatility Score",
         "Drawdown Score",
+        "Stock Strategy Support",
         "Beta vs SPY",
         "beta_control_score",
         "quality_momentum_score",
@@ -2664,6 +2856,7 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
         "Category",
         "Final Score",
         "Score Source",
+        "Stock Strategy Support",
         "Assigned Portfolio Weight",
         "Dollar Allocation",
         "Current Price",
@@ -2683,6 +2876,7 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
             {
                 "Final Score": "{:.2f}",
                 "ETF Strategy Score": "{:.2f}",
+                "Stock Strategy Support": "{:.0f}",
                 "Assigned Portfolio Weight": "{:.2%}",
                 "Dollar Allocation": "${:,.0f}",
                 "Current Price": "${:,.2f}",
@@ -2697,6 +2891,21 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
         ),
         use_container_width=True,
     )
+
+    stock_strategy_columns = [column for column in ranking.columns if column.startswith("S") and column[1:3].isdigit()]
+    if stock_strategy_columns:
+        with st.expander("Stock 20-Strategy Score Breakdown"):
+            st.caption(
+                "Each stock strategy score is rule-based and scaled from 0 to 1. "
+                "Stock Strategy Support counts how many of the 20 strategies score at least 0.70 for that stock."
+            )
+            breakdown_cols = ["Ticker", "Category", "Final Score", "Stock Strategy Support"] + stock_strategy_columns
+            st.dataframe(
+                ranking[ranking["Asset Type"] == "Stock"][breakdown_cols]
+                .head(50)
+                .style.format({column: "{:.2f}" for column in ["Final Score"] + stock_strategy_columns}),
+                use_container_width=True,
+            )
     st.plotly_chart(px.bar(ranking.head(25), x="Ticker", y="Final Score", color="Asset Type", title="Top Unified Asset Scores"), use_container_width=True)
 
 
