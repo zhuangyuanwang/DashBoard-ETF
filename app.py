@@ -201,6 +201,7 @@ REGIME_STOCK_PREFERENCES = {
 
 RISK_LIMITS = {
     "max_position_weight": 0.10,
+    "max_stock_position_weight": 0.05,
     "max_strategy_weight": 0.25,
     "max_sector_exposure": 0.35,
     "max_drawdown_warning": -0.10,
@@ -2029,7 +2030,13 @@ def build_unified_asset_ranking(etf_close, stock_selection, strategy_allocation,
     return ranking.sort_values("Final Score", ascending=False)[display_cols].reset_index(drop=True)
 
 
-def constrain_position_table(position_rows, initial_capital, max_position_weight=0.10, max_sector_exposure=0.35):
+def constrain_position_table(
+    position_rows,
+    initial_capital,
+    max_position_weight=0.10,
+    max_sector_exposure=0.35,
+    max_stock_position_weight=0.05,
+):
     if not position_rows:
         return pd.DataFrame(columns=["Ticker", "Asset Type", "Source", "Sector/Category", "Portfolio Weight", "Dollar Allocation", "Signal", "Reason"])
 
@@ -2052,9 +2059,10 @@ def constrain_position_table(position_rows, initial_capital, max_position_weight
     capped_weights = {}
     for _, row in grouped.iterrows():
         weight = row["Portfolio Weight"]
-        if row["Asset Type"] != "Cash" and weight > max_position_weight:
-            capped_weights[row["Ticker"]] = max_position_weight
-            overflow += weight - max_position_weight
+        asset_cap = min(max_stock_position_weight, max_position_weight) if row["Asset Type"] == "Stock" else max_position_weight
+        if row["Asset Type"] != "Cash" and weight > asset_cap:
+            capped_weights[row["Ticker"]] = asset_cap
+            overflow += weight - asset_cap
         else:
             capped_weights[row["Ticker"]] = weight
     grouped["Portfolio Weight"] = grouped["Ticker"].map(capped_weights)
@@ -2112,11 +2120,12 @@ def build_unified_portfolio_allocation(
     initial_capital,
     max_position_weight=0.10,
     max_sector_exposure=0.35,
+    max_stock_position_weight=0.05,
     stock_satellite_count=10,
     stock_core_share=0.40,
 ):
     if asset_ranking.empty:
-        return constrain_position_table([], initial_capital, max_position_weight, max_sector_exposure)
+        return constrain_position_table([], initial_capital, max_position_weight, max_sector_exposure, max_stock_position_weight)
 
     position_rows = []
     etf_budget = asset_targets.get("ETFs", 0.0)
@@ -2191,7 +2200,13 @@ def build_unified_portfolio_allocation(
             }
         )
 
-    return constrain_position_table(position_rows, initial_capital, max_position_weight, max_sector_exposure)
+    return constrain_position_table(
+        position_rows,
+        initial_capital,
+        max_position_weight,
+        max_sector_exposure,
+        max_stock_position_weight,
+    )
 
 
 def parse_selected_assets(selected_asset):
@@ -2909,7 +2924,14 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
     st.plotly_chart(px.bar(ranking.head(25), x="Ticker", y="Final Score", color="Asset Type", title="Top Unified Asset Scores"), use_container_width=True)
 
 
-def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets, max_position_weight=0.10, max_sector_exposure=0.35):
+def build_portfolio_risk_status(
+    portfolio_metrics,
+    position_allocation,
+    asset_targets,
+    max_position_weight=0.10,
+    max_sector_exposure=0.35,
+    max_stock_position_weight=0.05,
+):
     warnings = []
     if portfolio_metrics.get("max_drawdown", 0) < RISK_LIMITS["severe_drawdown_warning"]:
         warnings.append("Severe portfolio drawdown breach.")
@@ -2918,6 +2940,10 @@ def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_ta
     non_cash_positions = position_allocation[position_allocation["Asset Type"] != "Cash"] if not position_allocation.empty else pd.DataFrame()
     if not non_cash_positions.empty and non_cash_positions["Portfolio Weight"].max() > max_position_weight:
         warnings.append("Top holding exceeds max position weight.")
+    stock_positions = position_allocation[position_allocation["Asset Type"] == "Stock"] if not position_allocation.empty else pd.DataFrame()
+    effective_stock_cap = min(max_stock_position_weight, max_position_weight)
+    if not stock_positions.empty and stock_positions["Portfolio Weight"].max() > effective_stock_cap:
+        warnings.append("Top stock holding exceeds max stock weight.")
     if not position_allocation.empty:
         sector_exposure = (
             position_allocation[position_allocation["Asset Type"] != "Cash"]
@@ -2932,7 +2958,16 @@ def build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_ta
     return {"Status": status, "Warnings": warnings or ["No major risk limit warnings."]}
 
 
-def render_risk_dashboard(results, close, portfolio_metrics, position_allocation, asset_targets, max_position_weight, max_sector_exposure):
+def render_risk_dashboard(
+    results,
+    close,
+    portfolio_metrics,
+    position_allocation,
+    asset_targets,
+    max_position_weight,
+    max_sector_exposure,
+    max_stock_position_weight,
+):
     st.header("Risk Dashboard")
     final_cash_weight = position_allocation.loc[position_allocation["Asset Type"] == "Cash", "Portfolio Weight"].sum() if not position_allocation.empty else asset_targets.get("Cash / SHY / BIL", 0)
     c1, c2, c3, c4 = st.columns(4)
@@ -2940,7 +2975,14 @@ def render_risk_dashboard(results, close, portfolio_metrics, position_allocation
     c2.metric("Portfolio Sharpe", f"{portfolio_metrics.get('sharpe', np.nan):.2f}")
     c3.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
     c4.metric("Final Cash Allocation", f"{final_cash_weight * 100:.1f}%")
-    risk_status = build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets, max_position_weight, max_sector_exposure)
+    risk_status = build_portfolio_risk_status(
+        portfolio_metrics,
+        position_allocation,
+        asset_targets,
+        max_position_weight,
+        max_sector_exposure,
+        max_stock_position_weight,
+    )
     if risk_status["Status"] == "OK":
         st.success("Risk limit status: OK")
     elif risk_status["Status"] == "Watch":
@@ -3436,33 +3478,53 @@ def main():
         "Signals and backtests use daily bars; transaction costs use 5 bps for buys and 5 bps for sells."
     )
 
-    st.sidebar.header("Settings")
-    st.sidebar.caption("ETF universe is managed internally for regime detection, ETF signals, and benchmark comparisons.")
-    st.sidebar.subheader("Backtest Settings")
     all_etf_symbols = get_all_etf_symbols()
-    ma_default_index = all_etf_symbols.index("SPY") if "SPY" in all_etf_symbols else 0
-    ma_symbol = st.sidebar.selectbox("Trend Following ETF", all_etf_symbols, index=ma_default_index)
-    selected_strategy = st.sidebar.selectbox("Strategy Detail", STRATEGY_TYPES, index=0)
-    backtest_period_label = st.sidebar.selectbox("Backtest Date Range", list(BACKTEST_PERIODS.keys()), index=2)
-    portfolio_mode = st.sidebar.selectbox("Portfolio Mode", PORTFOLIO_MODES, index=2)
-    top_n_stocks = st.sidebar.slider("Top N Stocks", min_value=3, max_value=25, value=10, step=1)
-    benchmark_symbol = st.sidebar.selectbox("Benchmark", all_etf_symbols, index=ma_default_index)
-    transaction_cost_bps = st.sidebar.slider("Transaction Cost (bps per buy/sell)", min_value=0, max_value=100, value=5, step=1)
+    ma_symbol = "SPY"
+    selected_strategy = "Momentum Rotation"
+    backtest_period_label = "10 Years"
+    portfolio_mode = "ETF + Stock"
+    top_n_stocks = 10
+    benchmark_symbol = "SPY" if "SPY" in all_etf_symbols else all_etf_symbols[0]
+    transaction_cost_bps = 5
     transaction_cost = transaction_cost_bps / 10000
-    initial_portfolio_value = st.sidebar.number_input("Initial Capital", min_value=10000, value=INITIAL_CAPITAL, step=50000)
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Allocation Settings")
-    default_etf_weight = 0.70 if portfolio_mode == "ETF-only" else 0.0 if portfolio_mode == "Stock-only" else 0.60
-    default_stock_weight = 0.0 if portfolio_mode == "ETF-only" else 0.90 if portfolio_mode == "Stock-only" else 0.30
-    default_cash_weight = 1 - default_etf_weight - default_stock_weight
-    etf_allocation_pct = st.sidebar.slider("ETF Allocation %", 0, 100, int(default_etf_weight * 100), step=5) / 100
-    stock_allocation_pct = st.sidebar.slider("Stock Allocation %", 0, 100, int(default_stock_weight * 100), step=5) / 100
-    cash_allocation_pct = st.sidebar.slider("Cash Allocation %", 0, 100, int(default_cash_weight * 100), step=5) / 100
-    max_strategy_weight = st.sidebar.slider("Max Strategy Weight", 0.05, 0.50, RISK_LIMITS["max_strategy_weight"], step=0.01)
-    max_position_weight = st.sidebar.slider("Max Position Weight", 0.02, 0.25, RISK_LIMITS["max_position_weight"], step=0.01)
-    max_sector_exposure = st.sidebar.slider("Max Sector Exposure", 0.10, 0.60, RISK_LIMITS["max_sector_exposure"], step=0.05)
-    risk_off_cash_min = st.sidebar.slider("Risk-Off Cash Minimum", 0.0, 0.50, RISK_LIMITS["risk_off_cash_minimum"], step=0.05)
-    enable_cash_allocation = st.sidebar.checkbox("Enable Cash Allocation", value=True)
+    initial_portfolio_value = INITIAL_CAPITAL
+    etf_allocation_pct = 0.60
+    stock_allocation_pct = 0.30
+    cash_allocation_pct = 0.10
+    max_strategy_weight = RISK_LIMITS["max_strategy_weight"]
+    max_position_weight = RISK_LIMITS["max_position_weight"]
+    max_stock_position_weight = RISK_LIMITS["max_stock_position_weight"]
+    max_sector_exposure = RISK_LIMITS["max_sector_exposure"]
+    risk_off_cash_min = RISK_LIMITS["risk_off_cash_minimum"]
+    enable_cash_allocation = True
+
+    st.sidebar.header("Recommendation Model")
+    st.sidebar.caption("Client-facing view: settings are fixed so the dashboard presents one recommendation portfolio.")
+    st.sidebar.markdown(
+        f"""
+**Portfolio Mode:** {portfolio_mode}  
+**Benchmark:** {benchmark_symbol}  
+**Backtest Window:** {backtest_period_label}  
+**Initial Capital:** ${initial_portfolio_value:,.0f}  
+**Transaction Cost:** {transaction_cost_bps} bps per buy/sell  
+
+**Target Sleeves**  
+- ETFs: {etf_allocation_pct:.0%}  
+- Stocks: {stock_allocation_pct:.0%}  
+- Cash: {cash_allocation_pct:.0%}  
+
+**Risk Limits**  
+- Max ETF/position weight: {max_position_weight:.0%}  
+- Max single-stock weight: {max_stock_position_weight:.0%}  
+- Max sector exposure: {max_sector_exposure:.0%}  
+- Risk-off cash minimum: {risk_off_cash_min:.0%}  
+
+**Strategy Engine**  
+- ETF strategies: {len(STRATEGY_TYPES)}  
+- Stock scoring strategies: 20  
+- Stock satellite names: Top {top_n_stocks}
+"""
+    )
 
     backtest_end = pd.Timestamp.today().normalize()
     backtest_start = backtest_end - pd.DateOffset(years=BACKTEST_PERIODS[backtest_period_label])
@@ -3545,6 +3607,7 @@ def main():
         initial_portfolio_value,
         max_position_weight=max_position_weight,
         max_sector_exposure=max_sector_exposure,
+        max_stock_position_weight=max_stock_position_weight,
         stock_satellite_count=top_n_stocks,
         stock_core_share=0.40,
     )
@@ -3630,6 +3693,7 @@ def main():
             asset_targets,
             max_position_weight,
             max_sector_exposure,
+            max_stock_position_weight,
         )
 
     with backtesting_tab:
