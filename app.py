@@ -204,6 +204,7 @@ RISK_LIMITS = {
     "max_stock_position_weight": 0.05,
     "max_strategy_weight": 0.25,
     "max_sector_exposure": 0.35,
+    "target_max_drawdown": -0.15,
     "max_drawdown_warning": -0.10,
     "severe_drawdown_warning": -0.20,
     "risk_off_cash_minimum": 0.15,
@@ -2423,7 +2424,8 @@ def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL, strategy_
     metrics["net_return"] = net_equity.iloc[-1] - 1
     metrics["var_95"] = var95
     metrics["expected_shortfall_95"] = es95
-    metrics["transaction_cost_drag"] = gross_equity.iloc[-1] - net_equity.iloc[-1]
+    metrics["transaction_cost_drag"] = overlay_costs.sum()
+    metrics["risk_overlay_return_impact"] = net_equity.iloc[-1] - gross_equity.iloc[-1]
     metrics["total_turnover"] = sum(
         results[strategy_name]["metrics"]["total_turnover"] * weights.get(strategy_name, 0.0)
         for strategy_name in net_df.columns
@@ -2440,7 +2442,74 @@ def build_portfolio_backtest(results, initial_capital=INITIAL_CAPITAL, strategy_
     return portfolio_returns, metrics
 
 
-def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_close, initial_capital=INITIAL_CAPITAL, strategy_results=None):
+def apply_portfolio_drawdown_overlay(base_returns, prices, initial_capital=INITIAL_CAPITAL, transaction_cost=0.0005):
+    if base_returns.empty:
+        return base_returns, pd.Series(dtype=float), pd.Series(dtype=float)
+
+    index = base_returns.index
+    if "SPY" not in prices.columns:
+        exposure = pd.Series(1.0, index=index)
+        costs = pd.Series(0.0, index=index)
+        return base_returns.copy(), exposure, costs
+
+    spy = prices["SPY"].reindex(index).ffill()
+    spy_returns = spy.pct_change(fill_method=None).fillna(0.0)
+    defensive_returns = (
+        prices["SHY"].reindex(index).ffill().pct_change(fill_method=None).fillna(0.0)
+        if "SHY" in prices.columns
+        else pd.Series(0.0, index=index)
+    )
+
+    spy_ma200 = spy.rolling(200).mean()
+    spy_ret60 = spy.pct_change(60, fill_method=None)
+    spy_vol20 = spy_returns.rolling(20).std() * np.sqrt(252)
+    spy_drawdown60 = spy / spy.rolling(60).max() - 1
+
+    market_exposure = pd.Series(1.0, index=index)
+    market_exposure = market_exposure.mask(spy < spy_ma200, 0.55)
+    market_exposure = market_exposure.mask((spy < spy_ma200) & (spy_ret60 < -0.05), 0.30)
+    market_exposure = market_exposure.mask((spy_vol20 > 0.28) | (spy_drawdown60 < -0.10), market_exposure.clip(upper=0.30))
+    market_exposure = market_exposure.mask(spy_vol20 > 0.35, market_exposure.clip(upper=0.10))
+    market_exposure = market_exposure.shift(1).fillna(1.0).clip(0.0, 1.0)
+
+    overlay_returns = pd.Series(0.0, index=index)
+    exposure_used = pd.Series(1.0, index=index)
+    overlay_costs = pd.Series(0.0, index=index)
+    equity = initial_capital
+    peak = initial_capital
+    drawdown_exposure = 1.0
+    previous_exposure = 1.0
+
+    for date in index:
+        exposure = min(float(market_exposure.loc[date]), drawdown_exposure)
+        risk_off_weight = 1.0 - exposure
+        day_return = exposure * base_returns.loc[date] + risk_off_weight * defensive_returns.loc[date]
+        exposure_turnover = abs(exposure - previous_exposure)
+        cost = exposure_turnover * transaction_cost
+        day_return -= cost
+
+        equity *= 1 + day_return
+        peak = max(peak, equity)
+        current_drawdown = equity / peak - 1
+
+        if current_drawdown <= -0.10:
+            drawdown_exposure = 0.10
+        elif current_drawdown <= -0.07:
+            drawdown_exposure = 0.30
+        elif current_drawdown <= -0.04:
+            drawdown_exposure = 0.60
+        elif current_drawdown > -0.02 and market_exposure.loc[date] >= 0.80:
+            drawdown_exposure = 1.0
+
+        overlay_returns.loc[date] = day_return
+        exposure_used.loc[date] = exposure
+        overlay_costs.loc[date] = cost
+        previous_exposure = exposure
+
+    return overlay_returns, exposure_used, overlay_costs
+
+
+def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_close, initial_capital=INITIAL_CAPITAL, strategy_results=None, transaction_cost=0.0005):
     if position_allocation.empty:
         return pd.DataFrame(), {}
 
@@ -2459,13 +2528,19 @@ def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_clos
 
     if tradable_weights.empty:
         common_index = returns.index
-        portfolio_net_returns = pd.Series(0.0, index=common_index)
+        base_portfolio_returns = pd.Series(0.0, index=common_index)
     else:
         tradable_weights = tradable_weights / max(1.0, tradable_weights.sum() + total_cash_weight)
         common_index = returns.index
-        portfolio_net_returns = returns.loc[common_index, tradable_weights.index].mul(tradable_weights, axis=1).sum(axis=1)
+        base_portfolio_returns = returns.loc[common_index, tradable_weights.index].mul(tradable_weights, axis=1).sum(axis=1)
 
-    portfolio_gross_returns = portfolio_net_returns.copy()
+    portfolio_gross_returns = base_portfolio_returns.copy()
+    portfolio_net_returns, risk_exposure, overlay_costs = apply_portfolio_drawdown_overlay(
+        base_portfolio_returns,
+        prices.reindex(common_index),
+        initial_capital=initial_capital,
+        transaction_cost=transaction_cost,
+    )
     portfolio_net_value = initial_capital * (1 + portfolio_net_returns).cumprod()
     portfolio_gross_value = initial_capital * (1 + portfolio_gross_returns).cumprod()
     portfolio_returns = pd.DataFrame(
@@ -2474,6 +2549,8 @@ def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_clos
             "Net Return": portfolio_net_returns,
             "Gross Value": portfolio_gross_value,
             "Net Value": portfolio_net_value,
+            "Risk Exposure": risk_exposure,
+            "Overlay Cost": overlay_costs,
         }
     )
     if portfolio_returns.empty:
@@ -2491,6 +2568,9 @@ def build_holdings_portfolio_backtest(position_allocation, etf_close, stock_clos
     metrics["var_95"] = var95
     metrics["expected_shortfall_95"] = es95
     metrics["transaction_cost_drag"] = gross_equity.iloc[-1] - net_equity.iloc[-1]
+    metrics["risk_overlay_cost"] = overlay_costs.sum()
+    metrics["average_risk_exposure"] = risk_exposure.mean()
+    metrics["min_risk_exposure"] = risk_exposure.min()
     metrics["total_turnover"] = 0.0
     metrics["active_strategies"] = len(strategy_results) if strategy_results else 0
     metrics["warning_strategies"] = 0
@@ -2740,6 +2820,11 @@ def render_regime_aware_portfolio_overview(
     c6.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
     c7.metric("Final Cash Allocation", f"{final_cash_weight * 100:.1f}%")
     c8.metric("Risk Status", build_portfolio_risk_status(portfolio_metrics, position_allocation, asset_targets)["Status"])
+    c9, c10, c11, c12 = st.columns(4)
+    c9.metric("Avg Risk Exposure", f"{portfolio_metrics.get('average_risk_exposure', np.nan) * 100:.1f}%")
+    c10.metric("Min Risk Exposure", f"{portfolio_metrics.get('min_risk_exposure', np.nan) * 100:.1f}%")
+    c11.metric("Risk Overlay Cost", f"{portfolio_metrics.get('risk_overlay_cost', 0.0) * 100:.2f}%")
+    c12.metric("Overlay Return Impact", f"{portfolio_metrics.get('risk_overlay_return_impact', 0.0) * 100:.2f}%")
     st.info(regime["regime_explanation"])
     st.success(f"Portfolio recommendation: {portfolio_metrics.get('recommendation', 'Keep current allocation')}")
 
@@ -2975,6 +3060,10 @@ def render_risk_dashboard(
     c2.metric("Portfolio Sharpe", f"{portfolio_metrics.get('sharpe', np.nan):.2f}")
     c3.metric("Max Drawdown", f"{portfolio_metrics.get('max_drawdown', np.nan) * 100:.2f}%")
     c4.metric("Final Cash Allocation", f"{final_cash_weight * 100:.1f}%")
+    c5, c6, c7 = st.columns(3)
+    c5.metric("Average Risk Exposure", f"{portfolio_metrics.get('average_risk_exposure', np.nan) * 100:.1f}%")
+    c6.metric("Minimum Risk Exposure", f"{portfolio_metrics.get('min_risk_exposure', np.nan) * 100:.1f}%")
+    c7.metric("Overlay Cost", f"{portfolio_metrics.get('risk_overlay_cost', 0.0) * 100:.2f}%")
     risk_status = build_portfolio_risk_status(
         portfolio_metrics,
         position_allocation,
@@ -3368,6 +3457,12 @@ def render_clean_backtesting(results, portfolio_returns, portfolio_metrics, sele
     fig.update_layout(title="Portfolio Combined Backtest vs Benchmark", xaxis_title="Date", yaxis_title="Value ($)", template="plotly_white")
     st.plotly_chart(fig, use_container_width=True)
 
+    if "Risk Exposure" in portfolio_returns.columns:
+        st.plotly_chart(
+            px.area(portfolio_returns, x=portfolio_returns.index, y="Risk Exposure", title="Portfolio Risk Exposure Overlay"),
+            use_container_width=True,
+        )
+
     drawdown = portfolio_returns["Net Value"] / portfolio_returns["Net Value"].cummax() - 1
     st.plotly_chart(px.area(x=drawdown.index, y=drawdown, title="Portfolio Drawdown"), use_container_width=True)
 
@@ -3622,6 +3717,7 @@ def main():
         stock_close,
         initial_capital=initial_portfolio_value,
         strategy_results=strategy_results,
+        transaction_cost=transaction_cost,
     )
     portfolio_metrics.update(
         calculate_active_risk_metrics(
