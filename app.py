@@ -1944,7 +1944,7 @@ def learn_white_box_stock_strategy_weights(stock_close, spy, regime, stock_strat
         for strategy_column in stock_strategy_columns:
             if strategy_column not in score_frame.columns:
                 continue
-            ic = score_frame[strategy_column].corr(target, method="spearman")
+            ic = calculate_spearman_without_scipy(score_frame[strategy_column], target)
             if pd.notna(ic):
                 ic_rows.append({"Date": signal_date, "Strategy": strategy_column, "IC": ic})
 
@@ -1967,6 +1967,15 @@ def learn_white_box_stock_strategy_weights(stock_close, spy, regime, stock_strat
         }
     )
     return result.sort_values("Learned Weight", ascending=False).reset_index(drop=True)
+
+
+def calculate_spearman_without_scipy(left, right):
+    paired = pd.concat([pd.Series(left), pd.Series(right)], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(paired) < 3:
+        return np.nan
+    left_rank = paired.iloc[:, 0].rank(method="average")
+    right_rank = paired.iloc[:, 1].rank(method="average")
+    return left_rank.corr(right_rank)
 
 
 def normalize_series(values):
