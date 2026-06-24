@@ -1738,7 +1738,7 @@ def build_strategy_monitoring_table(results, initial_capital=INITIAL_CAPITAL, st
     return pd.DataFrame(rows)
 
 
-def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
+def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10, learn_white_box=True):
     if stock_close.empty or benchmark_close.empty:
         return pd.DataFrame()
     category_map = get_stock_category_map()
@@ -1858,7 +1858,24 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     raw["beta_control_score"] = raw["S17 Beta Control"]
     raw["quality_momentum_score"] = raw[stock_strategy_columns].mean(axis=1)
     raw["Stock Strategy Support"] = (raw[stock_strategy_columns] >= 0.70).sum(axis=1)
-    raw["Stock Score"] = raw[stock_strategy_columns].mean(axis=1)
+    raw["Rule-Based Score"] = raw[stock_strategy_columns].mean(axis=1)
+    white_box_weights = learn_white_box_stock_strategy_weights(
+        stock_close,
+        spy,
+        regime,
+        stock_strategy_columns,
+    ) if learn_white_box else pd.DataFrame()
+    if white_box_weights.empty:
+        weight_map = pd.Series(1 / len(stock_strategy_columns), index=stock_strategy_columns)
+        ic_map = pd.Series(0.0, index=stock_strategy_columns)
+    else:
+        weight_map = white_box_weights.set_index("Strategy")["Learned Weight"].reindex(stock_strategy_columns).fillna(0.0)
+        ic_map = white_box_weights.set_index("Strategy")["Historical IC"].reindex(stock_strategy_columns).fillna(0.0)
+    raw["Learned White-Box Score"] = raw[stock_strategy_columns].mul(weight_map, axis=1).sum(axis=1)
+    raw["Stock Score"] = 0.70 * raw["Rule-Based Score"] + 0.30 * raw["Learned White-Box Score"]
+    for strategy_column in stock_strategy_columns:
+        raw[f"WB Weight {strategy_column}"] = weight_map.get(strategy_column, 0.0)
+        raw[f"WB IC {strategy_column}"] = ic_map.get(strategy_column, 0.0)
     preferred = REGIME_STOCK_PREFERENCES.get(regime["regime_name"], [])
     raw["Regime Preference Boost"] = raw["Category"].isin(preferred).astype(float) * 0.15
     if regime["regime_name"] in ["Risk-Off Bear Market", "High Volatility / Crisis"]:
@@ -1882,6 +1899,74 @@ def calculate_stock_selection(stock_close, benchmark_close, regime, top_n=10):
     if top_n is None:
         return ranked
     return ranked.head(top_n)
+
+
+def learn_white_box_stock_strategy_weights(stock_close, spy, regime, stock_strategy_columns, lookback_months=24, target_days=20):
+    if stock_close.empty or spy.empty or len(stock_close) < 320:
+        return pd.DataFrame()
+
+    month_ends = stock_close.resample("ME").last().index
+    if len(month_ends) < 14:
+        return pd.DataFrame()
+
+    ic_rows = []
+    candidate_dates = month_ends[-(lookback_months + 2):-1]
+    for signal_month_end in candidate_dates:
+        signal_dates = stock_close.index[stock_close.index <= signal_month_end]
+        if len(signal_dates) == 0:
+            continue
+        signal_date = signal_dates[-1]
+        start_loc = stock_close.index.get_indexer([signal_date])[0]
+        future_loc = start_loc + target_days
+        if future_loc >= len(stock_close) or start_loc < 260:
+            continue
+
+        historical_scores = calculate_stock_selection(
+            stock_close.loc[:signal_date],
+            spy.loc[:signal_date],
+            regime,
+            top_n=None,
+            learn_white_box=False,
+        )
+        if historical_scores.empty:
+            continue
+
+        tickers = historical_scores["Ticker"].tolist()
+        current_price = stock_close.iloc[start_loc].reindex(tickers)
+        future_price = stock_close.iloc[future_loc].reindex(tickers)
+        forward_return = future_price / current_price - 1
+        forward_vol = stock_close[tickers].pct_change(fill_method=None).iloc[start_loc + 1:future_loc + 1].std() * np.sqrt(252)
+        target = (forward_return / (forward_vol + 0.05)).replace([np.inf, -np.inf], np.nan).dropna()
+        if target.count() < 20:
+            continue
+
+        score_frame = historical_scores.set_index("Ticker").reindex(target.index)
+        for strategy_column in stock_strategy_columns:
+            if strategy_column not in score_frame.columns:
+                continue
+            ic = score_frame[strategy_column].corr(target, method="spearman")
+            if pd.notna(ic):
+                ic_rows.append({"Date": signal_date, "Strategy": strategy_column, "IC": ic})
+
+    if not ic_rows:
+        return pd.DataFrame()
+
+    ic_table = pd.DataFrame(ic_rows)
+    summary = ic_table.groupby("Strategy")["IC"].mean().reindex(stock_strategy_columns).fillna(0.0)
+    positive_ic = summary.clip(lower=0.0)
+    if positive_ic.sum() <= 0:
+        learned_weight = pd.Series(1 / len(stock_strategy_columns), index=stock_strategy_columns)
+    else:
+        learned_weight = positive_ic / positive_ic.sum()
+
+    result = pd.DataFrame(
+        {
+            "Strategy": stock_strategy_columns,
+            "Historical IC": summary.reindex(stock_strategy_columns).values,
+            "Learned Weight": learned_weight.reindex(stock_strategy_columns).values,
+        }
+    )
+    return result.sort_values("Learned Weight", ascending=False).reset_index(drop=True)
 
 
 def normalize_series(values):
@@ -2015,6 +2100,8 @@ def build_unified_asset_ranking(etf_close, stock_selection, strategy_allocation,
         "Trend Score",
         "Volatility Score",
         "Drawdown Score",
+        "Rule-Based Score",
+        "Learned White-Box Score",
         "Stock Strategy Support",
         "Beta vs SPY",
         "beta_control_score",
@@ -2956,6 +3043,8 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
         "Category",
         "Final Score",
         "Score Source",
+        "Rule-Based Score",
+        "Learned White-Box Score",
         "Stock Strategy Support",
         "Assigned Portfolio Weight",
         "Dollar Allocation",
@@ -2975,6 +3064,8 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
         ranking[display_cols].style.format(
             {
                 "Final Score": "{:.2f}",
+                "Rule-Based Score": "{:.2f}",
+                "Learned White-Box Score": "{:.2f}",
                 "ETF Strategy Score": "{:.2f}",
                 "Stock Strategy Support": "{:.0f}",
                 "Assigned Portfolio Weight": "{:.2%}",
@@ -2994,16 +3085,41 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
 
     stock_strategy_columns = [column for column in ranking.columns if column.startswith("S") and column[1:3].isdigit()]
     if stock_strategy_columns:
+        stock_rows = ranking[ranking["Asset Type"] == "Stock"]
+        wb_weight_columns = [f"WB Weight {column}" for column in stock_strategy_columns if f"WB Weight {column}" in ranking.columns]
+        if not stock_rows.empty and wb_weight_columns:
+            first_stock = stock_rows.iloc[0]
+            weight_rows = []
+            for strategy_column in stock_strategy_columns:
+                weight_rows.append(
+                    {
+                        "Strategy": strategy_column,
+                        "Historical IC": first_stock.get(f"WB IC {strategy_column}", np.nan),
+                        "Learned Weight": first_stock.get(f"WB Weight {strategy_column}", np.nan),
+                    }
+                )
+            st.subheader("White-Box Learned Strategy Weights")
+            st.caption(
+                "Weights are learned from historical cross-sectional information coefficients between each strategy score "
+                "and future 20-day risk-adjusted stock returns. Negative historical ICs receive zero allocation."
+            )
+            st.dataframe(
+                pd.DataFrame(weight_rows)
+                .sort_values("Learned Weight", ascending=False)
+                .style.format({"Historical IC": "{:.3f}", "Learned Weight": "{:.2%}"}),
+                use_container_width=True,
+            )
+
         with st.expander("Stock 20-Strategy Score Breakdown"):
             st.caption(
                 "Each stock strategy score is rule-based and scaled from 0 to 1. "
                 "Stock Strategy Support counts how many of the 20 strategies score at least 0.70 for that stock."
             )
-            breakdown_cols = ["Ticker", "Category", "Final Score", "Stock Strategy Support"] + stock_strategy_columns
+            breakdown_cols = ["Ticker", "Category", "Final Score", "Rule-Based Score", "Learned White-Box Score", "Stock Strategy Support"] + stock_strategy_columns
             st.dataframe(
-                ranking[ranking["Asset Type"] == "Stock"][breakdown_cols]
+                stock_rows[breakdown_cols]
                 .head(50)
-                .style.format({column: "{:.2f}" for column in ["Final Score"] + stock_strategy_columns}),
+                .style.format({column: "{:.2f}" for column in ["Final Score", "Rule-Based Score", "Learned White-Box Score"] + stock_strategy_columns}),
                 use_container_width=True,
             )
     st.plotly_chart(px.bar(ranking.head(25), x="Ticker", y="Final Score", color="Asset Type", title="Top Unified Asset Scores"), use_container_width=True)
