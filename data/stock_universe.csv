@@ -82,7 +82,7 @@ AFL,Financials,Insurance,Financials
 ALL,Financials,Insurance,Financials
 TRV,Financials,Insurance,Financials
 CB,Financials,Insurance,Financials
-MMC,Financials,Insurance Brokers,Financials
+ERIE,Financials,Insurance,Financials
 AON,Financials,Insurance Brokers,Financials
 AJG,Financials,Insurance Brokers,Financials
 SPGI,Financials,Financial Data,Financials
@@ -101,7 +101,7 @@ HBAN,Financials,Banks,Financials
 RF,Financials,Banks,Financials
 CFG,Financials,Banks,Financials
 SYF,Financials,Consumer Finance,Financials
-DFS,Financials,Consumer Finance,Financials
+CINF,Financials,Insurance,Financials
 BRO,Financials,Insurance Brokers,Financials
 WRB,Financials,Insurance,Financials
 PFG,Financials,Insurance,Financials
@@ -122,7 +122,7 @@ WMB,Energy,Midstream,Energy / Inflation
 KMI,Energy,Midstream,Energy / Inflation
 LNG,Energy,LNG Infrastructure,Energy / Inflation
 TRGP,Energy,Midstream,Energy / Inflation
-HES,Energy,Exploration & Production,Energy / Inflation
+TPL,Energy,Oil & Gas Royalties,Energy / Inflation
 DVN,Energy,Exploration & Production,Energy / Inflation
 FANG,Energy,Exploration & Production,Energy / Inflation
 HAL,Energy,Oilfield Services,Energy / Inflation
