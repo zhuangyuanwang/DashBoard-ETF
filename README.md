@@ -10,7 +10,7 @@ A Streamlit quant research dashboard using free market data. The app now has two
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
 - Build 12-1 momentum, low-volatility, beta, drawdown, and trend features
 - Evaluate 60/20/20 train/validation/test splits and combinatorial purged CV
-- Backtest equal-weight, inverse-variance risk parity, market-neutral long/short, and 130/30 portfolios
+- Backtest equal-weight, inverse-variance risk parity, market-neutral long/short, and 130/30 portfolios with true walk-forward OOS signals
 - Apply transaction costs, slippage, and a monthly turnover cap
 - Track Sharpe, Sortino, Calmar, information ratio, alpha, beta, drawdown, and hit rate
 - Select ETFs from a predefined universe

@@ -131,7 +131,7 @@ def temporal_train_validation_test_split(index: pd.Index) -> dict[str, pd.Index]
     }
 
 
-def fit_stage_a1_models(x: pd.DataFrame, y: pd.Series, splits: dict[str, pd.Index]):
+def create_stage_a1_model(model_name: str):
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.linear_model import ElasticNet, Lasso, LinearRegression, Ridge
     from sklearn.pipeline import make_pipeline
@@ -144,14 +144,19 @@ def fit_stage_a1_models(x: pd.DataFrame, y: pd.Series, splits: dict[str, pd.Inde
         "Elastic Net": ElasticNet(alpha=0.0005, l1_ratio=0.50, max_iter=10000),
         "RF Sanity Check": RandomForestRegressor(n_estimators=150, max_depth=4, min_samples_leaf=30, random_state=7),
     }
+    return make_pipeline(StandardScaler(), model_specs[model_name])
+
+
+def fit_stage_a1_models(x: pd.DataFrame, y: pd.Series, splits: dict[str, pd.Index]):
+    model_names = ["OLS", "Ridge", "LASSO", "Elastic Net", "RF Sanity Check"]
     fitted = {}
     predictions = pd.DataFrame(index=x.index)
     metrics = []
     x_train = x.loc[splits["train"]]
     y_train = y.loc[splits["train"]]
 
-    for name, estimator in model_specs.items():
-        model = make_pipeline(StandardScaler(), estimator)
+    for name in model_names:
+        model = create_stage_a1_model(name)
         model.fit(x_train, y_train)
         fitted[name] = model
         predictions[name] = model.predict(x)
@@ -172,6 +177,51 @@ def fit_stage_a1_models(x: pd.DataFrame, y: pd.Series, splits: dict[str, pd.Inde
                 }
             )
     return fitted, predictions, pd.DataFrame(metrics)
+
+
+def build_walk_forward_predictions(
+    x: pd.DataFrame,
+    y: pd.Series,
+    model_name: str,
+    month_ends: pd.Index,
+    min_train_samples: int = 500,
+    label_embargo_days: int = 35,
+) -> tuple[pd.Series, pd.DataFrame]:
+    row_dates = x.index.get_level_values("date")
+    prediction_parts = []
+    log_rows = []
+
+    for month_end in month_ends:
+        available_feature_dates = pd.Index(row_dates[row_dates <= month_end].unique())
+        if available_feature_dates.empty:
+            continue
+        signal_date = available_feature_dates.max()
+        label_cutoff = signal_date - pd.Timedelta(days=label_embargo_days)
+        train_mask = row_dates <= label_cutoff
+        prediction_mask = row_dates == signal_date
+
+        if train_mask.sum() < min_train_samples or prediction_mask.sum() == 0:
+            continue
+
+        model = create_stage_a1_model(model_name)
+        model.fit(x.loc[train_mask], y.loc[train_mask])
+        prediction = pd.Series(model.predict(x.loc[prediction_mask]), index=x.loc[prediction_mask].index)
+        prediction_parts.append(prediction)
+        log_rows.append(
+            {
+                "Signal Date": signal_date,
+                "Training Cutoff": label_cutoff,
+                "Train Samples": int(train_mask.sum()),
+                "Predicted Names": int(prediction_mask.sum()),
+                "Model": model_name,
+            }
+        )
+
+    if not prediction_parts:
+        return pd.Series(dtype=float, name="score"), pd.DataFrame(log_rows)
+    predictions = pd.concat(prediction_parts).sort_index()
+    predictions.name = "score"
+    return predictions, pd.DataFrame(log_rows)
 
 
 def build_cpcv_summary(
@@ -240,6 +290,8 @@ def build_stage_a1_portfolios(
     turnover_cap: float,
     short_weight: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if predictions.empty:
+        return pd.DataFrame(), pd.DataFrame()
     daily_returns = close.pct_change(fill_method=None).dropna()
     month_ends = close.resample("ME").last().index
     prediction_frame = predictions.rename("score").reset_index().set_index("date")
@@ -259,7 +311,10 @@ def build_stage_a1_portfolios(
         available_dates = prediction_frame.index[prediction_frame.index <= signal_date]
         if len(available_dates) == 0:
             continue
-        signal_scores = prediction_frame.loc[available_dates[-1]].set_index("symbol")["score"].dropna()
+        signal_rows = prediction_frame.loc[available_dates[-1]]
+        if isinstance(signal_rows, pd.Series):
+            signal_rows = signal_rows.to_frame().T
+        signal_scores = signal_rows.set_index("symbol")["score"].dropna()
         tradable = [symbol for symbol in signal_scores.index if symbol in daily_returns.columns]
         if len(tradable) < 8:
             continue
@@ -401,15 +456,19 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
         splits = temporal_train_validation_test_split(x.index)
         fitted, predictions, model_metrics = fit_stage_a1_models(x, y, splits)
         cpcv = build_cpcv_summary(x, y)
-        selected_predictions = predictions[model_name]
+        month_ends = close.resample("ME").last().index
+        walk_forward_predictions, walk_forward_log = build_walk_forward_predictions(x, y, model_name, month_ends)
         portfolio_returns, turnover = build_stage_a1_portfolios(
             close,
-            selected_predictions,
+            walk_forward_predictions,
             transaction_cost_bps=transaction_cost_bps,
             slippage_bps=slippage_bps,
             turnover_cap=turnover_cap,
             short_weight=0.30,
         )
+        if portfolio_returns.empty:
+            st.error("Not enough walk-forward predictions to build a true out-of-sample portfolio return.")
+            return
         benchmark = close["SPY"].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0) if "SPY" in close else None
         metrics = calculate_stage_a1_metrics(portfolio_returns, benchmark=benchmark)
 
@@ -422,7 +481,7 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
     summary_cols[0].metric("Feature Samples", f"{len(x):,}")
     summary_cols[1].metric("Tradable Symbols", close.shape[1])
     summary_cols[2].metric("Train / Val / Test", "60 / 20 / 20")
-    summary_cols[3].metric("Turnover Cap", f"{turnover_cap:.0%}")
+    summary_cols[3].metric("OOS Rebalances", f"{len(walk_forward_log):,}")
 
     overview_tab, models_tab, portfolio_tab, validation_tab, paper_tab = st.tabs(
         ["Overview", "Linear Models", "Portfolio Backtest", "CPCV", "Working Paper"]
@@ -435,7 +494,7 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
                 ("Universe", "S&P-style local stock universe + sector ETFs", "Implemented"),
                 ("Models", "OLS, Ridge, LASSO, Elastic Net plus RF sanity check", "Implemented"),
                 ("Features", "12-1 momentum, 3M/6M momentum, low-vol, beta, drawdown, trend", "Implemented"),
-                ("Portfolio", "EW, inverse-variance risk parity, market-neutral L/S, 130/30", "Implemented"),
+                ("Portfolio", "Walk-forward EW, inverse-variance risk parity, market-neutral L/S, 130/30", "Implemented"),
                 ("Validation", "60/20/20 split plus combinatorial purged CV", "Implemented"),
                 ("Execution", "10-20 bps costs, linear slippage, 50% turnover cap", "Implemented"),
                 ("Deliverable", "Dashboard + paper template", "Implemented"),
@@ -468,7 +527,11 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
             st.plotly_chart(px.bar(coefficients, x="Coefficient", y="Feature", orientation="h", title=f"{model_name} Feature Coefficients"), use_container_width=True)
 
     with portfolio_tab:
-        st.subheader("Net Portfolio Performance")
+        st.subheader("True Walk-Forward Net Portfolio Performance")
+        st.caption(
+            "This return chart is built only from out-of-sample monthly predictions. "
+            "Each rebalance trains the selected model using data available before the signal date, then trades the following month."
+        )
         equity = (1 + portfolio_returns).cumprod()
         if benchmark is not None:
             equity["SPY Benchmark"] = (1 + benchmark).cumprod()
@@ -495,6 +558,9 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
             st.subheader("Execution and Turnover")
             st.plotly_chart(px.line(turnover, x="Date", y="Turnover", color="Portfolio", title="Monthly Turnover After Cap"), use_container_width=True)
             st.dataframe(turnover.tail(30), use_container_width=True, hide_index=True)
+        if not walk_forward_log.empty:
+            st.subheader("Walk-Forward Training Log")
+            st.dataframe(walk_forward_log.tail(24), use_container_width=True, hide_index=True)
 
     with validation_tab:
         st.subheader("Purged K-Fold Validation Sanity Check")

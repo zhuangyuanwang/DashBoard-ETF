@@ -37,7 +37,7 @@ A shallow Random Forest is included only as a nonlinear sanity check, not as the
 
 ## 5. Portfolio Construction
 
-Forecasts are converted into four portfolios:
+Out-of-sample walk-forward forecasts are converted into four portfolios:
 
 - Equal-weight top bucket
 - Inverse-variance risk parity top bucket
@@ -48,7 +48,7 @@ The implementation applies monthly rebalancing, fixed transaction costs, linear 
 
 ## 6. Backtest Methodology
 
-The target variable is the next 21-trading-day return. Model diagnostics use a 60/20/20 temporal split. The dashboard also includes combinatorial purged cross-validation to reduce leakage from overlapping forward-return labels.
+The target variable is the next 21-trading-day return. Model diagnostics use a 60/20/20 temporal split. The dashboard also includes combinatorial purged cross-validation to reduce leakage from overlapping forward-return labels. Portfolio returns are built with a monthly walk-forward process: at each rebalance, the model is trained only on labels that would have been known before the signal date, then the next month is traded out of sample.
 
 ## 7. Results
 
