@@ -5,6 +5,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+from src.stage_a1 import render_stage_a1_dashboard
 
 st.set_page_config(page_title="ETF Dashboard", page_icon="📈", layout="wide")
 
@@ -3692,6 +3693,15 @@ def render_dynamic_backtest(results, close, max_strategy_weight, benchmark_symbo
 
 
 def main():
+    app_mode = st.sidebar.radio(
+        "Dashboard Mode",
+        ["Stage A1 Research Lab", "Regime-Aware Portfolio Dashboard"],
+        index=0,
+    )
+    if app_mode == "Stage A1 Research Lab":
+        render_stage_a1_dashboard(STOCK_UNIVERSE_FILE)
+        return
+
     st.title("Regime-Aware Multi-Strategy Portfolio Dashboard")
     st.write(
         "A first-version regime-aware allocation, risk management, ETF strategy, and stock selection dashboard. "
