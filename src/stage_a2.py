@@ -145,8 +145,11 @@ def build_stage_a2_features(close: pd.DataFrame, macro: pd.DataFrame, benchmark_
     feature_panel = pd.concat(rows).reset_index(names="date")
     target_panel = pd.concat(targets, axis=1).stack(future_stack=True).rename("target_1m")
     target_panel.index.names = ["date", "symbol"]
-    feature_panel = feature_panel.set_index(["date", "symbol"]).join(target_panel).replace([np.inf, -np.inf], np.nan).dropna()
+    feature_panel = feature_panel.set_index(["date", "symbol"]).join(target_panel).replace([np.inf, -np.inf], np.nan)
+    feature_panel = feature_panel.dropna(subset=["target_1m"])
     y = feature_panel.pop("target_1m")
+    feature_panel = feature_panel.dropna(axis=1, how="all")
+    feature_panel = feature_panel.apply(lambda column: column.fillna(column.median()), axis=0).fillna(0.0)
     return feature_panel, y
 
 
@@ -236,6 +239,8 @@ def hrp_weights(returns: pd.DataFrame) -> pd.Series:
     from scipy.spatial.distance import squareform
 
     returns = returns.dropna(axis=1, how="all").fillna(0.0)
+    if returns.shape[1] == 0:
+        return pd.Series(dtype=float)
     if returns.shape[1] == 1:
         return pd.Series(1.0, index=returns.columns)
     cov = returns.cov()
