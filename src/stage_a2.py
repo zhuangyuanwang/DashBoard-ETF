@@ -176,6 +176,7 @@ def build_walk_forward_ml_predictions(
     y: pd.Series,
     model_name: str,
     min_train_samples: int = 300,
+    min_history_months: int = 18,
 ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
     dates = pd.Index(sorted(x.index.get_level_values("date").unique()))
     row_dates = x.index.get_level_values("date")
@@ -183,7 +184,8 @@ def build_walk_forward_ml_predictions(
     log_rows = []
     importance_rows = []
 
-    for signal_date in dates[18:-1]:
+    start_idx = min(min_history_months, max(1, len(dates) - 2))
+    for signal_date in dates[start_idx:-1]:
         train_mask = row_dates < signal_date
         predict_mask = row_dates == signal_date
         if train_mask.sum() < min_train_samples or predict_mask.sum() == 0:
@@ -211,6 +213,47 @@ def build_walk_forward_ml_predictions(
     signal.name = "score"
     importance_history = pd.concat(importance_rows, ignore_index=True) if importance_rows else pd.DataFrame()
     return signal, pd.DataFrame(log_rows), importance_history
+
+
+def build_white_box_fallback_predictions(x: pd.DataFrame, min_history_months: int = 12) -> tuple[pd.Series, pd.DataFrame]:
+    if x.empty:
+        return pd.Series(dtype=float, name="score"), pd.DataFrame()
+    dates = pd.Index(sorted(x.index.get_level_values("date").unique()))
+    row_dates = x.index.get_level_values("date")
+    prediction_parts = []
+    log_rows = []
+    start_idx = min(min_history_months, max(1, len(dates) - 2))
+    for signal_date in dates[start_idx:-1]:
+        cross_section = x.loc[row_dates == signal_date]
+        if cross_section.empty:
+            continue
+        score = pd.Series(0.0, index=cross_section.index)
+        for feature, weight in {
+            "ret_12m": 0.30,
+            "ret_6m": 0.25,
+            "ret_3m": 0.20,
+            "market_ret_3m": 0.10,
+            "vol_12m": -0.10,
+            "drawdown_12m": 0.05,
+        }.items():
+            if feature in cross_section:
+                values = cross_section[feature]
+                z_score = (values - values.mean()) / values.std() if values.std() > 0 else values * 0
+                score = score + weight * z_score.fillna(0.0)
+        prediction_parts.append(score)
+        log_rows.append(
+            {
+                "Signal Date": signal_date,
+                "Train Samples": 0,
+                "Predicted Assets": int(len(score)),
+                "Model": "White-Box Fallback",
+            }
+        )
+    if not prediction_parts:
+        return pd.Series(dtype=float, name="score"), pd.DataFrame(log_rows)
+    predictions = pd.concat(prediction_parts).sort_index()
+    predictions.name = "score"
+    return predictions, pd.DataFrame(log_rows)
 
 
 def extract_feature_importance(model, feature_names: pd.Index) -> pd.DataFrame:
@@ -514,16 +557,62 @@ def run_stage_a2_research(
     kelly_fraction: float,
 ):
     x, y = build_stage_a2_features(close, macro)
-    predictions, walk_log, importance_history = build_walk_forward_ml_predictions(x, y, model_name)
+    diagnostics = {
+        "Requested Model": model_name,
+        "Effective Model": model_name,
+        "Fallback Used": False,
+        "Feature Samples": len(x),
+        "Feature Dates": len(x.index.get_level_values("date").unique()) if not x.empty else 0,
+        "Feature Assets": len(x.index.get_level_values("symbol").unique()) if not x.empty else 0,
+    }
+    predictions = pd.Series(dtype=float, name="score")
+    walk_log = pd.DataFrame()
+    importance_history = pd.DataFrame()
+    attempts = [
+        (model_name, 300, 18),
+        (model_name, 150, 12),
+        ("Decision Tree", 100, 9),
+        ("Elastic Net", 60, 6),
+    ]
+    seen = set()
+    for candidate_model, min_samples, min_history in attempts:
+        key = (candidate_model, min_samples, min_history)
+        if key in seen or x.empty:
+            continue
+        seen.add(key)
+        try:
+            predictions, walk_log, importance_history = build_walk_forward_ml_predictions(
+                x,
+                y,
+                candidate_model,
+                min_train_samples=min_samples,
+                min_history_months=min_history,
+            )
+        except Exception:
+            predictions, walk_log, importance_history = pd.Series(dtype=float, name="score"), pd.DataFrame(), pd.DataFrame()
+        if not predictions.empty:
+            diagnostics["Effective Model"] = candidate_model
+            diagnostics["Min Train Samples"] = min_samples
+            diagnostics["Min History Months"] = min_history
+            break
+
+    if predictions.empty and not x.empty:
+        predictions, walk_log = build_white_box_fallback_predictions(x)
+        importance_history = pd.DataFrame()
+        diagnostics["Effective Model"] = "White-Box Fallback"
+        diagnostics["Fallback Used"] = True
+
     portfolio_returns, execution = build_stage_a2_portfolios(close, predictions, base_cost_bps, impact_bps, kelly_fraction)
     if portfolio_returns.empty:
-        return x, predictions, walk_log, importance_history, portfolio_returns, execution, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return x, predictions, walk_log, importance_history, portfolio_returns, execution, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), diagnostics
     benchmark = close["SPY"].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0) if "SPY" in close else None
     metrics = calculate_metrics(portfolio_returns, benchmark)
     regimes = detect_regime_states(close)
     stress = stress_test_returns(portfolio_returns)
     exposures = factor_exposure_heatmap(portfolio_returns, close)
-    return x, predictions, walk_log, importance_history, portfolio_returns, execution, metrics, regimes, stress, exposures
+    diagnostics["Prediction Count"] = len(predictions)
+    diagnostics["Portfolio Return Rows"] = len(portfolio_returns)
+    return x, predictions, walk_log, importance_history, portfolio_returns, execution, metrics, regimes, stress, exposures, diagnostics
 
 
 def render_stage_a2_dashboard(stock_universe_file) -> None:
@@ -559,7 +648,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         return
 
     with st.spinner("Training walk-forward ML models and building A2 portfolios..."):
-        x, predictions, walk_log, importance_history, portfolio_returns, execution, metrics, regimes, stress, exposures = run_stage_a2_research(
+        x, predictions, walk_log, importance_history, portfolio_returns, execution, metrics, regimes, stress, exposures, diagnostics = run_stage_a2_research(
             close,
             macro,
             model_name,
@@ -569,6 +658,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         )
         if portfolio_returns.empty:
             st.error("Not enough walk-forward predictions to build Stage A2 portfolios.")
+            st.dataframe(pd.DataFrame([diagnostics]), use_container_width=True, hide_index=True)
             return
         benchmark = close["SPY"].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0) if "SPY" in close else None
 
@@ -577,6 +667,10 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     c2.metric("ML Samples", f"{len(x):,}")
     c3.metric("OOS Rebalances", f"{len(walk_log):,}")
     c4.metric("Macro Fields", macro.shape[1] if not macro.empty else 0)
+    if diagnostics.get("Fallback Used"):
+        st.warning("A2 used the white-box fallback signal because the selected ML model did not produce enough walk-forward predictions with the available data.")
+    elif diagnostics.get("Effective Model") != diagnostics.get("Requested Model"):
+        st.info(f"A2 used {diagnostics.get('Effective Model')} after the requested model produced insufficient predictions.")
 
     performance_tab, model_tab, regime_tab, risk_tab, execution_tab, paper_tab = st.tabs(
         ["Performance", "White-Box ML", "Regime States", "Risk & Stress", "Execution", "Working Paper #2"]
