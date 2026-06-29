@@ -12,6 +12,7 @@ import yfinance as yf
 
 
 SECTOR_ETFS = ["XLF", "XLE", "XLK", "XLI", "XLP", "XLU", "XLV"]
+STAGE_A1_INITIAL_CAPITAL = 1_000_000
 DEFAULT_STAGE_A1_UNIVERSE = [
     "AAPL",
     "MSFT",
@@ -405,6 +406,9 @@ def calculate_stage_a1_metrics(returns: pd.DataFrame, benchmark: pd.Series | Non
         rows.append(
             {
                 "Series": name,
+                "Ending Value": STAGE_A1_INITIAL_CAPITAL * equity.iloc[-1],
+                "Total PnL": STAGE_A1_INITIAL_CAPITAL * (equity.iloc[-1] - 1),
+                "Total Return": equity.iloc[-1] - 1,
                 "CAGR": cagr,
                 "Annual Volatility": ann_vol,
                 "Sharpe": sharpe,
@@ -433,6 +437,7 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
 
     with st.sidebar:
         st.header("Stage A1 Controls")
+        st.metric("Initial Capital", f"${STAGE_A1_INITIAL_CAPITAL:,.0f}")
         years = st.slider("Research window", min_value=3, max_value=12, value=7, step=1)
         max_names = st.slider("Max stock names", min_value=10, max_value=min(120, len(default_symbols)), value=min(40, len(default_symbols)), step=5)
         model_name = st.selectbox("Portfolio signal model", ["Ridge", "Elastic Net", "LASSO", "OLS", "RF Sanity Check"], index=0)
@@ -533,12 +538,26 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
             "Each rebalance trains the selected model using data available before the signal date, then trades the following month."
         )
         equity = (1 + portfolio_returns).cumprod()
+        dollar_equity = equity * STAGE_A1_INITIAL_CAPITAL
         if benchmark is not None:
             equity["SPY Benchmark"] = (1 + benchmark).cumprod()
-        st.plotly_chart(px.line(equity, x=equity.index, y=equity.columns, title="Growth of 1.0"), use_container_width=True)
+            dollar_equity["SPY Benchmark"] = equity["SPY Benchmark"] * STAGE_A1_INITIAL_CAPITAL
+
+        st.markdown("#### Performance Summary")
+        display_metrics = metrics.copy()
+        best_row = display_metrics.sort_values("Sharpe", ascending=False).iloc[0]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Best Strategy", best_row["Series"])
+        c2.metric("Ending Value", f"${best_row['Ending Value']:,.0f}")
+        c3.metric("Total PnL", f"${best_row['Total PnL']:,.0f}")
+        c4.metric("Sharpe", f"{best_row['Sharpe']:.2f}")
+
         st.dataframe(
-            metrics.style.format(
+            display_metrics.style.format(
                 {
+                    "Ending Value": "${:,.0f}",
+                    "Total PnL": "${:,.0f}",
+                    "Total Return": "{:.2%}",
                     "CAGR": "{:.2%}",
                     "Annual Volatility": "{:.2%}",
                     "Sharpe": "{:.2f}",
@@ -554,6 +573,17 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
             use_container_width=True,
             hide_index=True,
         )
+        st.markdown("#### $1,000,000 Equity Curve")
+        st.plotly_chart(
+            px.line(
+                dollar_equity,
+                x=dollar_equity.index,
+                y=dollar_equity.columns,
+                title="Portfolio Value from $1,000,000 Initial Capital",
+            ),
+            use_container_width=True,
+        )
+        st.plotly_chart(px.line(equity, x=equity.index, y=equity.columns, title="Growth of 1.0"), use_container_width=True)
         if not turnover.empty:
             st.subheader("Execution and Turnover")
             st.plotly_chart(px.line(turnover, x="Date", y="Turnover", color="Portfolio", title="Monthly Turnover After Cap"), use_container_width=True)
