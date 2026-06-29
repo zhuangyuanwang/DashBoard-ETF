@@ -421,12 +421,69 @@ def apply_square_root_market_impact(weights: pd.Series, previous: pd.Series, bas
     return turnover * base_bps / 10000 + np.sqrt(trade_size.clip(lower=0)).sum() * impact_bps / 10000
 
 
+def classify_risk_overlay_state(lookback: pd.DataFrame, benchmark: str = "SPY") -> tuple[str, float]:
+    if benchmark not in lookback or lookback[benchmark].dropna().shape[0] < 126:
+        return "Neutral", 1.0
+    benchmark_returns = lookback[benchmark].dropna()
+    cumulative = (1 + benchmark_returns).cumprod()
+    drawdown = cumulative.iloc[-1] / cumulative.cummax().iloc[-1] - 1
+    vol_3m = benchmark_returns.tail(63).std() * np.sqrt(252)
+    ret_3m = cumulative.iloc[-1] / cumulative.iloc[max(0, len(cumulative) - 64)] - 1 if len(cumulative) > 64 else 0.0
+    if drawdown < -0.15 or vol_3m > 0.30:
+        return "Bear / High Vol", 0.45
+    if drawdown < -0.08 or ret_3m < -0.06:
+        return "Defensive", 0.65
+    if ret_3m > 0.08 and vol_3m < 0.22:
+        return "Risk-On", 1.0
+    return "Neutral", 0.85
+
+
+def apply_a2_risk_overlay(
+    weights: pd.Series,
+    previous_weights: pd.Series,
+    lookback_returns: pd.DataFrame,
+    target_volatility: float,
+    smoothing: float,
+    enable_regime_overlay: bool,
+) -> tuple[pd.Series, dict]:
+    weights = weights.fillna(0.0)
+    previous = previous_weights.reindex(weights.index).fillna(0.0)
+    smoothed = previous * smoothing + weights * (1 - smoothing)
+
+    realized_vol = np.nan
+    vol_scale = 1.0
+    if not lookback_returns.empty and smoothed.abs().sum() > 0:
+        aligned = lookback_returns.reindex(columns=smoothed.index).fillna(0.0)
+        portfolio_returns = aligned.dot(smoothed).tail(63)
+        realized_vol = portfolio_returns.std() * np.sqrt(252)
+        if pd.notna(realized_vol) and realized_vol > 0 and target_volatility > 0:
+            vol_scale = min(1.0, target_volatility / realized_vol)
+
+    regime_state, regime_scale = classify_risk_overlay_state(lookback_returns)
+    if not enable_regime_overlay:
+        regime_state, regime_scale = "Disabled", 1.0
+
+    final_scale = min(vol_scale, regime_scale)
+    adjusted = smoothed * final_scale
+    return adjusted, {
+        "Risk Overlay State": regime_state,
+        "Realized Volatility": realized_vol,
+        "Vol Target Scale": vol_scale,
+        "Regime Scale": regime_scale,
+        "Final Risk Scale": final_scale,
+        "Smoothing": smoothing,
+    }
+
+
 def build_stage_a2_portfolios(
     close: pd.DataFrame,
     predictions: pd.Series,
     base_cost_bps: float,
     impact_bps: float,
     kelly_fraction: float,
+    target_volatility: float,
+    smoothing: float,
+    enable_regime_overlay: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if predictions.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -466,6 +523,14 @@ def build_stage_a2_portfolios(
         if not period_mask.any():
             continue
         for strategy_name, weights in target_weights.items():
+            weights, overlay_info = apply_a2_risk_overlay(
+                weights,
+                previous_weights[strategy_name],
+                lookback,
+                target_volatility,
+                smoothing,
+                enable_regime_overlay,
+            )
             cost = apply_square_root_market_impact(weights, previous_weights[strategy_name], base_cost_bps, impact_bps)
             period_returns = daily_returns.loc[period_mask, weights.index].dot(weights)
             if len(period_returns) > 0:
@@ -484,6 +549,7 @@ def build_stage_a2_portfolios(
                     "Concentration Warning": "Yes" if weights.max() > MAX_LONG_ONLY_WEIGHT + 1e-9 else "No",
                     "Long Count": int((weights > 0).sum()),
                     "Short Count": int((weights < 0).sum()),
+                    **overlay_info,
                 }
             )
             previous_weights[strategy_name] = weights
@@ -625,6 +691,9 @@ def run_stage_a2_research(
     base_cost_bps: float,
     impact_bps: float,
     kelly_fraction: float,
+    target_volatility: float,
+    smoothing: float,
+    enable_regime_overlay: bool,
 ):
     x, y = build_stage_a2_features(close, macro)
     diagnostics = {
@@ -674,7 +743,16 @@ def run_stage_a2_research(
         diagnostics["Prediction Source"] = "Fallback"
         diagnostics["Fallback Used"] = True
 
-    portfolio_returns, execution = build_stage_a2_portfolios(close, predictions, base_cost_bps, impact_bps, kelly_fraction)
+    portfolio_returns, execution = build_stage_a2_portfolios(
+        close,
+        predictions,
+        base_cost_bps,
+        impact_bps,
+        kelly_fraction,
+        target_volatility,
+        smoothing,
+        enable_regime_overlay,
+    )
     if portfolio_returns.empty:
         return x, predictions, walk_log, importance_history, portfolio_returns, execution, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), diagnostics
     benchmark = close["SPY"].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0) if "SPY" in close else None
@@ -707,6 +785,9 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         base_cost_bps = st.slider("Txn cost bps", min_value=10, max_value=20, value=12, step=1)
         impact_bps = st.slider("Square-root impact bps", min_value=1, max_value=20, value=6, step=1)
         kelly_fraction = st.slider("Fractional Kelly", min_value=0.25, max_value=0.50, value=0.25, step=0.05)
+        target_volatility = st.slider("Target volatility", min_value=0.06, max_value=0.20, value=0.12, step=0.01)
+        smoothing = st.slider("Weight smoothing", min_value=0.00, max_value=0.80, value=0.25, step=0.05)
+        enable_regime_overlay = st.toggle("Regime risk overlay", value=True)
 
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=years)
@@ -727,6 +808,9 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             base_cost_bps,
             impact_bps,
             kelly_fraction,
+            target_volatility,
+            smoothing,
+            enable_regime_overlay,
         )
         if portfolio_returns.empty:
             st.error("Not enough walk-forward predictions to build Stage A2 portfolios.")
@@ -750,7 +834,10 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
 
     with performance_tab:
         st.subheader("Stage A2 Walk-Forward Net Performance")
-        st.caption("Performance is net of fixed transaction costs and square-root market-impact estimates. Gross returns are not shown yet for A2.")
+        st.caption(
+            "Performance is net of fixed transaction costs and square-root market-impact estimates. "
+            "The default risk-managed settings target lower drawdown and volatility; disable the regime overlay or raise target volatility to compare a more aggressive profile."
+        )
         best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Best Portfolio", best["Series"])
@@ -866,6 +953,8 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                 Total_Estimated_Cost=("Market Impact Cost", "sum"),
                 Average_Estimated_Cost=("Market Impact Cost", "mean"),
                 Max_Position_Weight=("Max Position Weight", "max"),
+                Average_Risk_Scale=("Final Risk Scale", "mean"),
+                Min_Risk_Scale=("Final Risk Scale", "min"),
             )
             st.dataframe(
                 cost_summary.style.format(
@@ -874,6 +963,8 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                         "Total_Estimated_Cost": "{:.2%}",
                         "Average_Estimated_Cost": "{:.2%}",
                         "Max_Position_Weight": "{:.2%}",
+                        "Average_Risk_Scale": "{:.2%}",
+                        "Min_Risk_Scale": "{:.2%}",
                     }
                 ),
                 use_container_width=True,
@@ -890,6 +981,11 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                     "Gross Exposure": "{:.2f}x",
                     "Net Exposure": "{:.2f}x",
                     "Max Position Weight": "{:.2%}",
+                    "Realized Volatility": "{:.2%}",
+                    "Vol Target Scale": "{:.2%}",
+                    "Regime Scale": "{:.2%}",
+                    "Final Risk Scale": "{:.2%}",
+                    "Smoothing": "{:.2%}",
                 }
             ),
             use_container_width=True,
