@@ -2,11 +2,15 @@
 
 A Streamlit quant research dashboard using free market data. The app now has two modes:
 
+- **Stage A2 Research Lab:** ML-powered multi-asset white-box research pipeline.
 - **Stage A1 Research Lab:** linear benchmark research pipeline for the capstone.
 - **Regime-Aware Portfolio Dashboard:** the original ETF/stock strategy dashboard.
 
 ## Features
 
+- Run Stage A2 white-box ML models: Decision Tree, Random Forest, Gradient Boosting, and Elastic Net
+- Build HRP, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML portfolios
+- Visualize regime states, factor exposure heatmaps, stress tests, execution costs, and feature importance drift
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
 - Build 12-1 momentum, low-volatility, beta, drawdown, and trend features
 - Evaluate 60/20/20 train/validation/test splits and combinatorial purged CV
@@ -59,8 +63,10 @@ Dashboard/
 ├── app.py
 ├── src/
 │   └── stage_a1.py
+│   └── stage_a2.py
 ├── reports/
 │   └── working_paper_1.md
+│   └── working_paper_2.md
 ├── data/
 │   └── stock_universe.csv
 ├── README.md

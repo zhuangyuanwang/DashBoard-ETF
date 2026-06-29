@@ -6,6 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
 from src.stage_a1 import render_stage_a1_dashboard
+from src.stage_a2 import render_stage_a2_dashboard
 
 st.set_page_config(page_title="ETF Dashboard", page_icon="📈", layout="wide")
 
@@ -3695,9 +3696,12 @@ def render_dynamic_backtest(results, close, max_strategy_weight, benchmark_symbo
 def main():
     app_mode = st.sidebar.radio(
         "Dashboard Mode",
-        ["Stage A1 Research Lab", "Regime-Aware Portfolio Dashboard"],
+        ["Stage A2 Research Lab", "Stage A1 Research Lab", "Regime-Aware Portfolio Dashboard"],
         index=0,
     )
+    if app_mode == "Stage A2 Research Lab":
+        render_stage_a2_dashboard(STOCK_UNIVERSE_FILE)
+        return
     if app_mode == "Stage A1 Research Lab":
         render_stage_a1_dashboard(STOCK_UNIVERSE_FILE)
         return
