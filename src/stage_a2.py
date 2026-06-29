@@ -727,8 +727,24 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         if regimes.empty:
             st.warning("Not enough data for regime state detection.")
         else:
-            st.plotly_chart(px.scatter(regimes.reset_index(), x="index", y="return_1m", color="Regime", size="vol_6m", title="Bull / Bear / Recovery Regime States"), use_container_width=True)
-            st.plotly_chart(px.area(regimes.reset_index(), x="index", y="Regime Code", color="Regime", title="Regime Timeline"), use_container_width=True)
+            regime_chart = regimes.reset_index()
+            regime_chart = regime_chart.rename(columns={regime_chart.columns[0]: "Date"})
+            regime_chart["vol_6m"] = regime_chart["vol_6m"].abs().fillna(0.0).clip(lower=0.001)
+            st.plotly_chart(
+                px.scatter(
+                    regime_chart,
+                    x="Date",
+                    y="return_1m",
+                    color="Regime",
+                    size="vol_6m",
+                    title="Bull / Bear / Recovery Regime States",
+                ),
+                use_container_width=True,
+            )
+            st.plotly_chart(
+                px.area(regime_chart, x="Date", y="Regime Code", color="Regime", title="Regime Timeline"),
+                use_container_width=True,
+            )
 
     with risk_tab:
         st.subheader("Factor Exposure Heatmap")
