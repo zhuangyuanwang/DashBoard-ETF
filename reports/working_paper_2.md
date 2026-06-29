@@ -27,7 +27,7 @@ Tree-based feature importance is tracked through time as a white-box interpretab
 
 The framework converts monthly walk-forward predictions into:
 
-- Hierarchical Risk Parity top ML basket
+- HRP-style / risk-parity fallback top ML basket
 - Ledoit-Wolf shrinkage mean-variance portfolio
 - Fractional Kelly portfolio
 - Beta-neutral long/short ML portfolio
@@ -36,7 +36,7 @@ The framework converts monthly walk-forward predictions into:
 
 The dashboard includes:
 
-- Bull, bear, and recovery regime visualization
+- Rule-based / Gaussian-mixture bull, bear, and recovery regime proxy visualization
 - Factor exposure heatmaps
 - Stress windows for 2008, 2020, and 2022 when data history overlaps
 - Beta monitoring
@@ -52,7 +52,7 @@ Results should be filled from the Stage A2 dashboard after selecting the final u
 
 ## 8. Limitations
 
-This implementation is an A2 production-oriented MVP, not the final institutional research stack. Current limitations include simplified constituent history, simplified HMM-style regime detection through Gaussian mixture states, no full SHAP dependency by default, and limited alternative data beyond FRED and market proxies.
+This implementation is an A2 production-oriented MVP, not the final institutional research stack. Current limitations include simplified constituent history, rule-based regime proxy detection through Gaussian mixture states rather than a true HMM, HRP-style allocation with risk-parity fallback behavior when clustering inputs are sparse, no full SHAP dependency by default, and limited alternative data beyond FRED and market proxies.
 
 ## 9. Next Steps
 

@@ -95,8 +95,7 @@ def build_stage_a1_features(close: pd.DataFrame, benchmark_symbol: str = "SPY") 
         features = pd.DataFrame(
             {
                 "symbol": symbol,
-                "mom_12_1": close[symbol].pct_change(252, fill_method=None).shift(21)
-                - close[symbol].pct_change(21, fill_method=None),
+                "mom_12_1": close[symbol].shift(21) / close[symbol].shift(252) - 1,
                 "mom_6m": close[symbol].pct_change(126, fill_method=None),
                 "mom_3m": close[symbol].pct_change(63, fill_method=None),
                 "low_vol_3m": -symbol_returns.rolling(63).std() * np.sqrt(252),
@@ -188,6 +187,12 @@ def build_walk_forward_predictions(
     min_train_samples: int = 500,
     label_embargo_days: int = 35,
 ) -> tuple[pd.Series, pd.DataFrame]:
+    # Walk-forward discipline:
+    # - Features at signal_date use prices observed on or before signal_date.
+    # - Targets are 21-trading-day forward returns and are only used for rows whose
+    #   outcome window has fully elapsed before label_cutoff.
+    # - The model predicts the cross-section at signal_date, and portfolios trade
+    #   only after that signal date in build_stage_a1_portfolios.
     row_dates = x.index.get_level_values("date")
     prediction_parts = []
     log_rows = []
@@ -210,6 +215,9 @@ def build_walk_forward_predictions(
         prediction_parts.append(prediction)
         log_rows.append(
             {
+                "Train Start": row_dates[train_mask].min(),
+                "Train End": row_dates[train_mask].max(),
+                "Prediction Month": signal_date,
                 "Signal Date": signal_date,
                 "Training Cutoff": label_cutoff,
                 "Train Samples": int(train_mask.sum()),
@@ -535,7 +543,8 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
         st.subheader("True Walk-Forward Net Portfolio Performance")
         st.caption(
             "This return chart is built only from out-of-sample monthly predictions. "
-            "Each rebalance trains the selected model using data available before the signal date, then trades the following month."
+            "Each rebalance trains the selected model using data available before the signal date, then trades the following month. "
+            "A1 portfolio returns shown here are net of fixed transaction cost and slippage estimates."
         )
         equity = (1 + portfolio_returns).cumprod()
         dollar_equity = equity * STAGE_A1_INITIAL_CAPITAL
@@ -586,11 +595,31 @@ def render_stage_a1_dashboard(stock_universe_file) -> None:
         st.plotly_chart(px.line(equity, x=equity.index, y=equity.columns, title="Growth of 1.0"), use_container_width=True)
         if not turnover.empty:
             st.subheader("Execution and Turnover")
+            st.caption("A1 performance tables show net returns after fixed transaction cost and slippage estimates. Gross-return attribution is a known extension.")
+            turnover_summary = turnover.groupby("Portfolio", as_index=False).agg(
+                Average_Turnover=("Turnover", "mean"),
+                Total_Turnover=("Turnover", "sum"),
+            )
+            st.dataframe(
+                turnover_summary.style.format({"Average_Turnover": "{:.2f}x", "Total_Turnover": "{:.2f}x"}),
+                use_container_width=True,
+                hide_index=True,
+            )
             st.plotly_chart(px.line(turnover, x="Date", y="Turnover", color="Portfolio", title="Monthly Turnover After Cap"), use_container_width=True)
             st.dataframe(turnover.tail(30), use_container_width=True, hide_index=True)
         if not walk_forward_log.empty:
-            st.subheader("Walk-Forward Training Log")
-            st.dataframe(walk_forward_log.tail(24), use_container_width=True, hide_index=True)
+            st.subheader("Walk-Forward Debug Table")
+            debug_columns = [
+                "Train Start",
+                "Train End",
+                "Prediction Month",
+                "Signal Date",
+                "Training Cutoff",
+                "Train Samples",
+                "Predicted Names",
+                "Model",
+            ]
+            st.dataframe(walk_forward_log[[column for column in debug_columns if column in walk_forward_log.columns]].tail(24), use_container_width=True, hide_index=True)
 
     with validation_tab:
         st.subheader("Purged K-Fold Validation Sanity Check")

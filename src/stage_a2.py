@@ -10,6 +10,7 @@ import yfinance as yf
 STAGE_A2_INITIAL_CAPITAL = 1_000_000
 SECTOR_ETFS = ["XLF", "XLE", "XLK", "XLI", "XLP", "XLU", "XLV"]
 GLOBAL_PROXIES = ["SPY", "EFA", "EWJ", "EEM", "IWM", "VGK", "TLT", "IEF", "GLD", "DBC", "HYG", "LQD"]
+MAX_LONG_ONLY_WEIGHT = 0.25
 DEFAULT_A2_STOCKS = [
     "AAPL",
     "MSFT",
@@ -105,6 +106,9 @@ def build_stage_a2_features(close: pd.DataFrame, macro: pd.DataFrame, benchmark_
 
     macro_monthly = pd.DataFrame(index=monthly.index)
     if not macro.empty:
+        # FRED fields are aligned to month-end using observations available in
+        # the downloaded time series. This is a research proxy, not a full
+        # point-in-time release-calendar model for macro revisions.
         macro_monthly = macro.resample("ME").last().reindex(monthly.index).ffill()
         macro_monthly = macro_monthly.pct_change(fill_method=None).add_prefix("macro_delta_").join(
             macro.resample("ME").last().reindex(monthly.index).ffill().add_prefix("macro_level_")
@@ -178,6 +182,11 @@ def build_walk_forward_ml_predictions(
     min_train_samples: int = 300,
     min_history_months: int = 18,
 ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
+    # Walk-forward discipline:
+    # - Each signal_date trains only on rows with feature dates strictly before signal_date.
+    # - The target is next-month return from monthly_returns.shift(-1), used only in training.
+    # - Prediction rows are exactly the cross-section at signal_date; portfolio returns are
+    #   earned in the following month inside build_stage_a2_portfolios.
     dates = pd.Index(sorted(x.index.get_level_values("date").unique()))
     row_dates = x.index.get_level_values("date")
     predictions = []
@@ -196,10 +205,14 @@ def build_walk_forward_ml_predictions(
         predictions.append(prediction)
         log_rows.append(
             {
+                "Train Start": row_dates[train_mask].min(),
+                "Train End": row_dates[train_mask].max(),
+                "Prediction Month": signal_date,
                 "Signal Date": signal_date,
                 "Train Samples": int(train_mask.sum()),
                 "Predicted Assets": int(predict_mask.sum()),
                 "Model": model_name,
+                "Prediction Source": "ML",
             }
         )
         importance = extract_feature_importance(model, x.columns)
@@ -243,10 +256,14 @@ def build_white_box_fallback_predictions(x: pd.DataFrame, min_history_months: in
         prediction_parts.append(score)
         log_rows.append(
             {
+                "Train Start": pd.NaT,
+                "Train End": pd.NaT,
+                "Prediction Month": signal_date,
                 "Signal Date": signal_date,
                 "Train Samples": 0,
                 "Predicted Assets": int(len(score)),
                 "Model": "White-Box Fallback",
+                "Prediction Source": "Fallback",
             }
         )
     if not prediction_parts:
@@ -312,6 +329,31 @@ def hrp_weights(returns: pd.DataFrame) -> pd.Series:
     return weights / weights.sum()
 
 
+def cap_and_redistribute_long_weights(weights: pd.Series, max_weight: float = MAX_LONG_ONLY_WEIGHT) -> tuple[pd.Series, bool]:
+    weights = weights.clip(lower=0).fillna(0.0)
+    if weights.sum() <= 0:
+        return weights, False
+    weights = weights / weights.sum()
+    capped = weights.copy()
+    was_capped = False
+    for _ in range(20):
+        over = capped > max_weight
+        if not over.any():
+            break
+        was_capped = True
+        excess = (capped[over] - max_weight).sum()
+        capped[over] = max_weight
+        under = capped < max_weight
+        if not under.any() or excess <= 0:
+            break
+        under_weights = capped[under]
+        if under_weights.sum() <= 0:
+            capped[under] += excess / under.sum()
+        else:
+            capped[under] += excess * under_weights / under_weights.sum()
+    return capped / capped.sum() if capped.sum() > 0 else capped, was_capped
+
+
 def cluster_variance(cov: pd.DataFrame, assets: list[str]) -> float:
     sub_cov = cov.loc[assets, assets]
     inv_diag = 1 / np.diag(sub_cov).clip(min=1e-12)
@@ -335,7 +377,10 @@ def ledoit_wolf_weights(returns: pd.DataFrame, scores: pd.Series) -> pd.Series:
     raw = np.linalg.pinv(cov) @ mu
     raw = np.clip(raw, 0, None)
     weights = pd.Series(raw, index=assets)
-    return weights / weights.sum() if weights.sum() > 0 else pd.Series(1 / len(assets), index=assets)
+    if weights.sum() <= 0:
+        weights = pd.Series(1 / len(assets), index=assets)
+    weights, _ = cap_and_redistribute_long_weights(weights)
+    return weights
 
 
 def fractional_kelly_weights(returns: pd.DataFrame, scores: pd.Series, fraction: float) -> pd.Series:
@@ -346,7 +391,7 @@ def fractional_kelly_weights(returns: pd.DataFrame, scores: pd.Series, fraction:
     raw = (scores.loc[assets].clip(lower=0) / variance).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     if raw.sum() <= 0:
         raw = pd.Series(1.0, index=assets)
-    weights = raw / raw.sum()
+    weights, _ = cap_and_redistribute_long_weights(raw)
     return weights * fraction
 
 
@@ -388,7 +433,7 @@ def build_stage_a2_portfolios(
     daily_returns = close.pct_change(fill_method=None).dropna()
     prediction_frame = predictions.rename("score").reset_index().set_index("date")
     month_ends = close.resample("ME").last().index
-    strategy_names = ["HRP Top ML Basket", "Ledoit-Wolf Mean-Variance", "Fractional Kelly", "Beta-Neutral ML"]
+    strategy_names = ["HRP-style / Risk-Parity Fallback", "Ledoit-Wolf Mean-Variance", "Fractional Kelly", "Beta-Neutral ML"]
     returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     previous_weights = {name: pd.Series(0.0, index=close.columns) for name in strategy_names}
     execution_rows = []
@@ -411,7 +456,8 @@ def build_stage_a2_portfolios(
         lookback = daily_returns.loc[:signal_date].tail(252)
 
         target_weights = {}
-        target_weights["HRP Top ML Basket"] = hrp_weights(lookback[top_assets]).reindex(close.columns).fillna(0.0)
+        hrp_weight, _ = cap_and_redistribute_long_weights(hrp_weights(lookback[top_assets]))
+        target_weights["HRP-style / Risk-Parity Fallback"] = hrp_weight.reindex(close.columns).fillna(0.0)
         target_weights["Ledoit-Wolf Mean-Variance"] = ledoit_wolf_weights(lookback, scores.head(max(5, int(len(scores) * 0.30)))).reindex(close.columns).fillna(0.0)
         target_weights["Fractional Kelly"] = fractional_kelly_weights(lookback, scores.head(max(5, int(len(scores) * 0.30))), kelly_fraction).reindex(close.columns).fillna(0.0)
         target_weights["Beta-Neutral ML"] = beta_neutral_weights(lookback, scores).reindex(close.columns).fillna(0.0)
@@ -434,6 +480,8 @@ def build_stage_a2_portfolios(
                     "Market Impact Cost": cost,
                     "Gross Exposure": weights.abs().sum(),
                     "Net Exposure": weights.sum(),
+                    "Max Position Weight": weights.max(),
+                    "Concentration Warning": "Yes" if weights.max() > MAX_LONG_ONLY_WEIGHT + 1e-9 else "No",
                     "Long Count": int((weights > 0).sum()),
                     "Short Count": int((weights < 0).sum()),
                 }
@@ -482,13 +530,18 @@ def calculate_metrics(returns: pd.DataFrame, benchmark: pd.Series | None = None)
         cagr = equity.iloc[-1] ** (1 / years) - 1
         ann_vol = series.std() * np.sqrt(252)
         sharpe = series.mean() * 252 / ann_vol if ann_vol > 0 else np.nan
+        downside = series[series < 0].std() * np.sqrt(252)
+        sortino = series.mean() * 252 / downside if downside > 0 else np.nan
         drawdown = equity / equity.cummax() - 1
         max_dd = drawdown.min()
+        calmar = cagr / abs(max_dd) if max_dd < 0 else np.nan
         beta = np.nan
+        alpha = np.nan
         if benchmark is not None and not benchmark.empty:
             common = series.index.intersection(benchmark.index)
             if len(common) > 20 and benchmark.loc[common].var() > 0:
                 beta = series.loc[common].cov(benchmark.loc[common]) / benchmark.loc[common].var()
+                alpha = series.loc[common].mean() * 252 - beta * benchmark.loc[common].mean() * 252
         rows.append(
             {
                 "Series": name,
@@ -498,8 +551,12 @@ def calculate_metrics(returns: pd.DataFrame, benchmark: pd.Series | None = None)
                 "CAGR": cagr,
                 "Annual Volatility": ann_vol,
                 "Sharpe": sharpe,
+                "Sortino": sortino,
                 "Max Drawdown": max_dd,
+                "Calmar": calmar,
+                "Alpha": alpha,
                 "Beta": beta,
+                "Hit Rate": (series > 0).mean(),
             }
         )
     return pd.DataFrame(rows)
@@ -515,6 +572,17 @@ def stress_test_returns(returns: pd.DataFrame) -> pd.DataFrame:
     for label, (start, end) in windows.items():
         sample = returns.loc[(returns.index >= start) & (returns.index <= end)]
         if sample.empty:
+            rows.append(
+                {
+                    "Stress Window": label,
+                    "Series": "All",
+                    "Status": "Not enough data",
+                    "Return": np.nan,
+                    "Max Drawdown": np.nan,
+                    "Volatility": np.nan,
+                    "Observations": 0,
+                }
+            )
             continue
         equity = (1 + sample).cumprod()
         drawdown = equity / equity.cummax() - 1
@@ -523,9 +591,11 @@ def stress_test_returns(returns: pd.DataFrame) -> pd.DataFrame:
                 {
                     "Stress Window": label,
                     "Series": column,
+                    "Status": "Available",
                     "Return": equity[column].iloc[-1] - 1,
                     "Max Drawdown": drawdown[column].min(),
                     "Volatility": sample[column].std() * np.sqrt(252),
+                    "Observations": len(sample[column].dropna()),
                 }
             )
     return pd.DataFrame(rows)
@@ -560,6 +630,7 @@ def run_stage_a2_research(
     diagnostics = {
         "Requested Model": model_name,
         "Effective Model": model_name,
+        "Prediction Source": "ML",
         "Fallback Used": False,
         "Feature Samples": len(x),
         "Feature Dates": len(x.index.get_level_values("date").unique()) if not x.empty else 0,
@@ -600,6 +671,7 @@ def run_stage_a2_research(
         predictions, walk_log = build_white_box_fallback_predictions(x)
         importance_history = pd.DataFrame()
         diagnostics["Effective Model"] = "White-Box Fallback"
+        diagnostics["Prediction Source"] = "Fallback"
         diagnostics["Fallback Used"] = True
 
     portfolio_returns, execution = build_stage_a2_portfolios(close, predictions, base_cost_bps, impact_bps, kelly_fraction)
@@ -618,8 +690,8 @@ def run_stage_a2_research(
 def render_stage_a2_dashboard(stock_universe_file) -> None:
     st.title("Stage A2 Research Lab: ML-Powered Multi-Asset White-Box")
     st.write(
-        "Intermediate capstone stage with white-box ML, walk-forward validation, HRP/Ledoit/Kelly portfolios, "
-        "regime detection, factor exposure monitoring, stress tests, and execution cost tracking."
+        "Intermediate capstone stage with white-box ML, walk-forward validation, HRP-style/Ledoit/Kelly portfolios, "
+        "rule-based regime proxy visualization, factor exposure monitoring, stress tests, and execution cost tracking."
     )
 
     universe_table = pd.read_csv(stock_universe_file) if stock_universe_file.exists() else pd.DataFrame()
@@ -666,7 +738,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     c1.metric("Tradable Assets", close.shape[1])
     c2.metric("ML Samples", f"{len(x):,}")
     c3.metric("OOS Rebalances", f"{len(walk_log):,}")
-    c4.metric("Macro Fields", macro.shape[1] if not macro.empty else 0)
+    c4.metric("Prediction Source", diagnostics.get("Prediction Source", "ML"))
     if diagnostics.get("Fallback Used"):
         st.warning("A2 used the white-box fallback signal because the selected ML model did not produce enough walk-forward predictions with the available data.")
     elif diagnostics.get("Effective Model") != diagnostics.get("Requested Model"):
@@ -677,7 +749,8 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     )
 
     with performance_tab:
-        st.subheader("Stage A2 Walk-Forward Performance")
+        st.subheader("Stage A2 Walk-Forward Net Performance")
+        st.caption("Performance is net of fixed transaction costs and square-root market-impact estimates. Gross returns are not shown yet for A2.")
         best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Best Portfolio", best["Series"])
@@ -693,8 +766,12 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                     "CAGR": "{:.2%}",
                     "Annual Volatility": "{:.2%}",
                     "Sharpe": "{:.2f}",
+                    "Sortino": "{:.2f}",
                     "Max Drawdown": "{:.2%}",
+                    "Calmar": "{:.2f}",
+                    "Alpha": "{:.2%}",
                     "Beta": "{:.2f}",
+                    "Hit Rate": "{:.1%}",
                 }
             ),
             use_container_width=True,
@@ -720,10 +797,30 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             top_features = latest_importance["Feature"].head(8).tolist()
             st.plotly_chart(px.line(history[history["Feature"].isin(top_features)], x="Signal Date", y="Importance", color="Feature", title="Feature Importance Through Time"), use_container_width=True)
         st.subheader("Walk-Forward Training Log")
-        st.dataframe(walk_log.tail(36), use_container_width=True, hide_index=True)
+        debug_columns = [
+            "Train Start",
+            "Train End",
+            "Prediction Month",
+            "Signal Date",
+            "Train Samples",
+            "Predicted Assets",
+            "Model",
+            "Prediction Source",
+        ]
+        st.dataframe(walk_log[[column for column in debug_columns if column in walk_log.columns]].tail(36), use_container_width=True, hide_index=True)
+        fallback_months = walk_log[walk_log.get("Prediction Source", pd.Series(dtype=str)).eq("Fallback")] if not walk_log.empty and "Prediction Source" in walk_log else pd.DataFrame()
+        st.subheader("Fallback Months")
+        if fallback_months.empty:
+            st.success("No fallback months. The selected ML path produced the walk-forward predictions.")
+        else:
+            st.dataframe(fallback_months, use_container_width=True, hide_index=True)
 
     with regime_tab:
-        st.subheader("HMM-Style Regime State Visualization")
+        st.subheader("Rule-Based Regime Proxy Visualization")
+        st.write(
+            "This is not a true Hidden Markov Model. It uses a Gaussian-mixture clustering proxy on monthly SPY return, volatility, "
+            "and drawdown, then labels states as Bear, Recovery, or Bull by average return."
+        )
         if regimes.empty:
             st.warning("Not enough data for regime state detection.")
         else:
@@ -737,12 +834,12 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                     y="return_1m",
                     color="Regime",
                     size="vol_6m",
-                    title="Bull / Bear / Recovery Regime States",
+                    title="Rule-Based Bull / Bear / Recovery Regime Proxy",
                 ),
                 use_container_width=True,
             )
             st.plotly_chart(
-                px.area(regime_chart, x="Date", y="Regime Code", color="Regime", title="Regime Timeline"),
+                px.area(regime_chart, x="Date", y="Regime Code", color="Regime", title="Rule-Based Regime Proxy Timeline"),
                 use_container_width=True,
             )
 
@@ -762,6 +859,29 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     with execution_tab:
         st.subheader("Execution Quality Tracking")
         st.write("Costs use fixed transaction bps plus a square-root market-impact penalty based on monthly trade size.")
+        st.caption("A2 performance tables show net returns after estimated execution costs. Gross-return attribution is a known extension.")
+        if not execution.empty:
+            cost_summary = execution.groupby("Portfolio", as_index=False).agg(
+                Average_Turnover=("Turnover", "mean"),
+                Total_Estimated_Cost=("Market Impact Cost", "sum"),
+                Average_Estimated_Cost=("Market Impact Cost", "mean"),
+                Max_Position_Weight=("Max Position Weight", "max"),
+            )
+            st.dataframe(
+                cost_summary.style.format(
+                    {
+                        "Average_Turnover": "{:.2f}x",
+                        "Total_Estimated_Cost": "{:.2%}",
+                        "Average_Estimated_Cost": "{:.2%}",
+                        "Max_Position_Weight": "{:.2%}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        concentrated = execution[execution["Concentration Warning"].eq("Yes")] if "Concentration Warning" in execution else pd.DataFrame()
+        if not concentrated.empty:
+            st.warning("Some portfolios exceeded the 25% max-position concentration check. Review the rows marked in the execution table.")
         st.dataframe(
             execution.tail(48).style.format(
                 {
@@ -769,6 +889,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                     "Market Impact Cost": "{:.2%}",
                     "Gross Exposure": "{:.2f}x",
                     "Net Exposure": "{:.2f}x",
+                    "Max Position Weight": "{:.2%}",
                 }
             ),
             use_container_width=True,
@@ -784,8 +905,8 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
 - Universe: local equity universe, sector ETFs, and global proxies.
 - ML: Decision Tree, Random Forest, Gradient Boosting, Elastic Net.
 - White-box: feature importance and importance drift.
-- Portfolio: HRP, Ledoit-Wolf mean-variance, fractional Kelly, beta-neutral long/short.
-- Risk: bull/bear/recovery regime states, factor exposure heatmap, stress tests.
+- Portfolio: HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, beta-neutral long/short.
+- Risk: rule-based bull/bear/recovery regime proxy, factor exposure heatmap, stress tests.
 - Execution: fixed costs plus square-root market impact.
 
 Use `reports/working_paper_2.md` as the Stage A2 draft.
