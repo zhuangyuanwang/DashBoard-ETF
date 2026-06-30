@@ -10,7 +10,14 @@ import yfinance as yf
 STAGE_A2_INITIAL_CAPITAL = 1_000_000
 SECTOR_ETFS = ["XLF", "XLE", "XLK", "XLI", "XLP", "XLU", "XLV"]
 GLOBAL_PROXIES = ["SPY", "EFA", "EWJ", "EEM", "IWM", "VGK", "TLT", "IEF", "GLD", "DBC", "HYG", "LQD"]
+A2_ETF_SYMBOLS = set(SECTOR_ETFS + GLOBAL_PROXIES)
 MAX_LONG_ONLY_WEIGHT = 0.25
+TARGET_TYPES = [
+    "Next-month raw return",
+    "Next-month excess return vs SPY",
+    "Next-month outperform SPY classification",
+    "Next-month cross-sectional rank percentile",
+]
 DEFAULT_A2_STOCKS = [
     "AAPL",
     "MSFT",
@@ -75,6 +82,8 @@ def load_fred_macro(start_date: str, end_date: str) -> pd.DataFrame:
         "DFF": "fed_funds",
         "CPIAUCSL": "cpi",
         "UNRATE": "unemployment",
+        "INDPRO": "industrial_production",
+        "STLFSI4": "financial_stress",
     }
     frames = []
     for fred_id, name in series_map.items():
@@ -94,25 +103,60 @@ def load_fred_macro(start_date: str, end_date: str) -> pd.DataFrame:
         macro["yield_curve_10y2y"] = macro["ten_year_yield"] - macro["two_year_yield"]
     if "cpi" in macro.columns:
         macro["inflation_yoy"] = macro["cpi"].pct_change(12, fill_method=None)
+    if "industrial_production" in macro.columns:
+        macro["industrial_production_yoy"] = macro["industrial_production"].pct_change(12, fill_method=None)
     return macro
 
 
-def build_stage_a2_features(close: pd.DataFrame, macro: pd.DataFrame, benchmark_symbol: str = "SPY") -> tuple[pd.DataFrame, pd.Series]:
+def build_stage_a2_features(
+    close: pd.DataFrame,
+    macro: pd.DataFrame,
+    benchmark_symbol: str = "SPY",
+    target_type: str = "Next-month raw return",
+    return_forward_returns: bool = False,
+):
     monthly = close.resample("ME").last()
     monthly_returns = monthly.pct_change(fill_method=None)
     daily_returns = close.pct_change(fill_method=None)
-    target = monthly_returns.shift(-1)
+    forward_raw = monthly_returns.shift(-1)
+    forward_spy = forward_raw[benchmark_symbol] if benchmark_symbol in forward_raw else forward_raw.mean(axis=1)
+    forward_excess = forward_raw.sub(forward_spy, axis=0)
+    forward_rank = forward_raw.rank(axis=1, pct=True)
+    target = forward_raw
+    if target_type == "Next-month excess return vs SPY":
+        target = forward_excess
+    elif target_type == "Next-month outperform SPY classification":
+        target = (forward_excess > 0).astype(float).where(forward_excess.notna())
+    elif target_type == "Next-month cross-sectional rank percentile":
+        target = forward_rank
     spy = monthly_returns[benchmark_symbol] if benchmark_symbol in monthly_returns else monthly_returns.mean(axis=1)
+    spy_1m = monthly[benchmark_symbol].pct_change(1, fill_method=None) if benchmark_symbol in monthly else monthly.mean(axis=1).pct_change(1, fill_method=None)
+    spy_3m = monthly[benchmark_symbol].pct_change(3, fill_method=None) if benchmark_symbol in monthly else monthly.mean(axis=1).pct_change(3, fill_method=None)
+    spy_6m = monthly[benchmark_symbol].pct_change(6, fill_method=None) if benchmark_symbol in monthly else monthly.mean(axis=1).pct_change(6, fill_method=None)
+    spy_12m = monthly[benchmark_symbol].pct_change(12, fill_method=None) if benchmark_symbol in monthly else monthly.mean(axis=1).pct_change(12, fill_method=None)
+    ret_3m_rank = monthly.pct_change(3, fill_method=None).rank(axis=1, pct=True)
+    vol_12m_rank = monthly_returns.rolling(12).std().rank(axis=1, pct=True)
+    drawdown_12m_panel = monthly / monthly.rolling(12).max() - 1
+    drawdown_rank = drawdown_12m_panel.rank(axis=1, pct=True)
+    spy_daily = close[benchmark_symbol] if benchmark_symbol in close else close.mean(axis=1)
+    spy_above_200d = (spy_daily > spy_daily.rolling(200).mean()).astype(float).resample("ME").last().reindex(monthly.index)
+    spy_vol_60d = daily_returns[benchmark_symbol].rolling(60).std() * np.sqrt(252) if benchmark_symbol in daily_returns else daily_returns.mean(axis=1).rolling(60).std() * np.sqrt(252)
+    market_drawdown_252d = (spy_daily / spy_daily.rolling(252).max() - 1).resample("ME").last().reindex(monthly.index)
+    risk_off_dummy = ((spy_above_200d == 0) & (spy_vol_60d.resample("ME").last().reindex(monthly.index) > 0.25)).astype(float)
 
     macro_monthly = pd.DataFrame(index=monthly.index)
     if not macro.empty:
         # FRED fields are aligned to month-end using observations available in
         # the downloaded time series. This is a research proxy, not a full
         # point-in-time release-calendar model for macro revisions.
-        macro_monthly = macro.resample("ME").last().reindex(monthly.index).ffill()
-        macro_monthly = macro_monthly.pct_change(fill_method=None).add_prefix("macro_delta_").join(
-            macro.resample("ME").last().reindex(monthly.index).ffill().add_prefix("macro_level_")
+        macro_base = macro.resample("ME").last().reindex(monthly.index).ffill().shift(1)
+        macro_monthly = macro_base.pct_change(fill_method=None).add_prefix("macro_delta_").join(
+            macro_base.add_prefix("macro_level_")
         )
+        if "macro_level_ten_year_yield" in macro_monthly:
+            macro_monthly["macro_ten_year_yield_3m_change"] = macro_base["ten_year_yield"].diff(3)
+        if {"ten_year_yield", "two_year_yield"}.issubset(macro_base.columns):
+            macro_monthly["macro_2y10y_spread"] = macro_base["ten_year_yield"] - macro_base["two_year_yield"]
 
     rows = []
     targets = []
@@ -121,6 +165,11 @@ def build_stage_a2_features(close: pd.DataFrame, macro: pd.DataFrame, benchmark_
             continue
         symbol_daily = daily_returns[symbol]
         beta = symbol_daily.rolling(126).cov(daily_returns[benchmark_symbol]) / daily_returns[benchmark_symbol].rolling(126).var() if benchmark_symbol in daily_returns else np.nan
+        beta_60d = symbol_daily.rolling(60).cov(daily_returns[benchmark_symbol]) / daily_returns[benchmark_symbol].rolling(60).var() if benchmark_symbol in daily_returns else np.nan
+        corr_spy_60d = symbol_daily.rolling(60).corr(daily_returns[benchmark_symbol]) if benchmark_symbol in daily_returns else np.nan
+        corr_tlt_60d = symbol_daily.rolling(60).corr(daily_returns["TLT"]) if "TLT" in daily_returns else np.nan
+        ma50 = close[symbol].rolling(50).mean()
+        ma200 = close[symbol].rolling(200).mean()
         features = pd.DataFrame(
             {
                 "symbol": symbol,
@@ -128,10 +177,25 @@ def build_stage_a2_features(close: pd.DataFrame, macro: pd.DataFrame, benchmark_
                 "ret_3m": monthly[symbol].pct_change(3, fill_method=None),
                 "ret_6m": monthly[symbol].pct_change(6, fill_method=None),
                 "ret_12m": monthly[symbol].pct_change(12, fill_method=None),
+                "relative_ret_1m": monthly[symbol].pct_change(1, fill_method=None) - spy_1m,
+                "relative_ret_3m": monthly[symbol].pct_change(3, fill_method=None) - spy_3m,
+                "relative_ret_6m": monthly[symbol].pct_change(6, fill_method=None) - spy_6m,
+                "relative_ret_12m": monthly[symbol].pct_change(12, fill_method=None) - spy_12m,
+                "cross_sectional_momentum_rank": ret_3m_rank[symbol],
                 "vol_3m": monthly_returns[symbol].rolling(3).std(),
                 "vol_12m": monthly_returns[symbol].rolling(12).std(),
+                "cross_sectional_volatility_rank": vol_12m_rank[symbol],
                 "drawdown_12m": monthly[symbol] / monthly[symbol].rolling(12).max() - 1,
+                "cross_sectional_drawdown_rank": drawdown_rank[symbol],
                 "beta_6m": beta.resample("ME").last().reindex(monthly.index),
+                "beta_60d": beta_60d.resample("ME").last().reindex(monthly.index),
+                "corr_spy_60d": corr_spy_60d.resample("ME").last().reindex(monthly.index),
+                "corr_tlt_60d": corr_tlt_60d.resample("ME").last().reindex(monthly.index) if not isinstance(corr_tlt_60d, float) else np.nan,
+                "etf_above_200d": (close[symbol] > ma200).astype(float).resample("ME").last().reindex(monthly.index),
+                "etf_ma50_ma200_ratio": (ma50 / ma200 - 1).resample("ME").last().reindex(monthly.index),
+                "spy_above_200d": spy_above_200d,
+                "market_drawdown_252d": market_drawdown_252d,
+                "risk_off_dummy": risk_off_dummy,
                 "market_ret_3m": monthly[benchmark_symbol].pct_change(3, fill_method=None) if benchmark_symbol in monthly else monthly.mean(axis=1).pct_change(3, fill_method=None),
                 "global_risk": monthly_returns[[symbol for symbol in ["EFA", "EEM", "IWM", "VGK"] if symbol in monthly_returns]].mean(axis=1),
                 "rates_proxy": monthly_returns[[symbol for symbol in ["TLT", "IEF"] if symbol in monthly_returns]].mean(axis=1),
@@ -154,31 +218,77 @@ def build_stage_a2_features(close: pd.DataFrame, macro: pd.DataFrame, benchmark_
     y = feature_panel.pop("target_1m")
     feature_panel = feature_panel.dropna(axis=1, how="all")
     feature_panel = feature_panel.apply(lambda column: column.fillna(column.median()), axis=0).fillna(0.0)
+    if return_forward_returns:
+        forward = forward_raw.stack(future_stack=True).rename("forward_raw_return")
+        forward.index.names = ["date", "symbol"]
+        return feature_panel, y, forward.reindex(feature_panel.index)
     return feature_panel, y
 
 
-def create_stage_a2_model(model_name: str):
-    from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+def create_stage_a2_model(model_name: str, params: dict | None = None, target_type: str = "Next-month raw return"):
+    from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
     from sklearn.linear_model import ElasticNet
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
-    from sklearn.tree import DecisionTreeRegressor
+    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
+    params = params or {}
+    is_classification = target_type == "Next-month outperform SPY classification"
     if model_name == "Decision Tree":
-        return DecisionTreeRegressor(max_depth=4, min_samples_leaf=20, random_state=11)
+        if is_classification:
+            return DecisionTreeClassifier(max_depth=params.get("max_depth", 4), min_samples_leaf=params.get("min_samples_leaf", 20), random_state=11)
+        return DecisionTreeRegressor(max_depth=params.get("max_depth", 4), min_samples_leaf=params.get("min_samples_leaf", 20), random_state=11)
     if model_name == "Random Forest":
-        return RandomForestRegressor(n_estimators=120, max_depth=5, min_samples_leaf=12, random_state=11, n_jobs=-1)
+        model_class = RandomForestClassifier if is_classification else RandomForestRegressor
+        return model_class(
+            n_estimators=params.get("n_estimators", 120),
+            max_depth=params.get("max_depth", 5),
+            min_samples_leaf=params.get("min_samples_leaf", 12),
+            max_features=params.get("max_features", "sqrt"),
+            random_state=11,
+            n_jobs=-1,
+        )
     if model_name == "Gradient Boosting":
-        return GradientBoostingRegressor(n_estimators=120, max_depth=3, learning_rate=0.035, random_state=11)
+        model_class = GradientBoostingClassifier if is_classification else GradientBoostingRegressor
+        return model_class(
+            n_estimators=params.get("n_estimators", 120),
+            max_depth=params.get("max_depth", 3),
+            learning_rate=params.get("learning_rate", 0.035),
+            subsample=params.get("subsample", 1.0),
+            random_state=11,
+        )
     if model_name == "Elastic Net":
-        return make_pipeline(StandardScaler(), ElasticNet(alpha=0.0005, l1_ratio=0.35, max_iter=10000))
+        if is_classification:
+            from sklearn.linear_model import LogisticRegression
+
+            return make_pipeline(StandardScaler(), LogisticRegression(C=1 / params.get("alpha", 0.001), max_iter=20000))
+        return make_pipeline(
+            StandardScaler(),
+            ElasticNet(alpha=params.get("alpha", 0.0005), l1_ratio=params.get("l1_ratio", 0.35), max_iter=50000),
+        )
     raise ValueError(f"Unsupported Stage A2 model: {model_name}")
+
+
+def safe_spearman(left: pd.Series, right: pd.Series) -> float:
+    aligned = pd.DataFrame({"left": left, "right": right}).dropna()
+    if aligned.empty or aligned["left"].nunique() <= 1 or aligned["right"].nunique() <= 1:
+        return np.nan
+    return aligned["left"].corr(aligned["right"], method="spearman")
+
+
+def predict_stage_a2_model(model, x: pd.DataFrame, target_type: str) -> np.ndarray:
+    if target_type == "Next-month outperform SPY classification" and hasattr(model, "predict_proba"):
+        probabilities = model.predict_proba(x)
+        return probabilities[:, -1]
+    return model.predict(x)
 
 
 def build_walk_forward_ml_predictions(
     x: pd.DataFrame,
     y: pd.Series,
     model_name: str,
+    model_params: dict | None = None,
+    target_type: str = "Next-month raw return",
     min_train_samples: int = 300,
     min_history_months: int = 18,
 ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
@@ -199,10 +309,14 @@ def build_walk_forward_ml_predictions(
         predict_mask = row_dates == signal_date
         if train_mask.sum() < min_train_samples or predict_mask.sum() == 0:
             continue
-        model = create_stage_a2_model(model_name)
+        if target_type == "Next-month outperform SPY classification" and y.loc[train_mask].nunique() < 2:
+            continue
+        model = create_stage_a2_model(model_name, model_params, target_type)
         model.fit(x.loc[train_mask], y.loc[train_mask])
-        prediction = pd.Series(model.predict(x.loc[predict_mask]), index=x.loc[predict_mask].index)
+        prediction = pd.Series(predict_stage_a2_model(model, x.loc[predict_mask], target_type), index=x.loc[predict_mask].index)
         predictions.append(prediction)
+        train_prediction = pd.Series(predict_stage_a2_model(model, x.loc[train_mask], target_type), index=x.loc[train_mask].index)
+        train_ic = safe_spearman(train_prediction, y.loc[train_mask])
         log_rows.append(
             {
                 "Train Start": row_dates[train_mask].min(),
@@ -212,7 +326,9 @@ def build_walk_forward_ml_predictions(
                 "Train Samples": int(train_mask.sum()),
                 "Predicted Assets": int(predict_mask.sum()),
                 "Model": model_name,
+                "Model Params": str(model_params or {}),
                 "Prediction Source": "ML",
+                "Train IC": train_ic,
             }
         )
         importance = extract_feature_importance(model, x.columns)
@@ -271,6 +387,184 @@ def build_white_box_fallback_predictions(x: pd.DataFrame, min_history_months: in
     predictions = pd.concat(prediction_parts).sort_index()
     predictions.name = "score"
     return predictions, pd.DataFrame(log_rows)
+
+
+def get_stage_a2_param_grid(model_name: str) -> list[dict]:
+    if model_name == "Elastic Net":
+        return [{"alpha": alpha, "l1_ratio": l1_ratio} for alpha in [0.0001, 0.001, 0.01, 0.1] for l1_ratio in [0.1, 0.5, 0.9]]
+    if model_name == "Random Forest":
+        return [
+            {"n_estimators": n, "max_depth": depth, "min_samples_leaf": leaf, "max_features": max_features}
+            for n in [100, 300]
+            for depth in [2, 3, 4, 5]
+            for leaf in [5, 10, 20]
+            for max_features in ["sqrt", "log2"]
+        ]
+    if model_name == "Gradient Boosting":
+        return [
+            {"n_estimators": n, "learning_rate": lr, "max_depth": depth, "subsample": subsample}
+            for n in [50, 100, 200]
+            for lr in [0.01, 0.03, 0.05]
+            for depth in [2, 3]
+            for subsample in [0.7, 0.9, 1.0]
+        ]
+    return [{}]
+
+
+def evaluate_prediction_signal(predictions: pd.Series, forward_returns: pd.Series) -> dict:
+    if predictions.empty or forward_returns.empty:
+        return {"Prediction IC": np.nan, "Top-Bottom Spread": np.nan, "Top Basket Sharpe": np.nan}
+    frame = pd.DataFrame({"score": predictions, "forward": forward_returns.reindex(predictions.index)}).dropna()
+    if frame.empty:
+        return {"Prediction IC": np.nan, "Top-Bottom Spread": np.nan, "Top Basket Sharpe": np.nan}
+    monthly_rows = []
+    for date, group in frame.groupby(level="date"):
+        ranked = group.sort_values("score", ascending=False)
+        if len(ranked) < 6:
+            continue
+        top_n = min(5, max(1, len(ranked) // 5))
+        bottom_n = top_n
+        top_return = ranked.head(top_n)["forward"].mean()
+        bottom_return = ranked.tail(bottom_n)["forward"].mean()
+        monthly_rows.append(
+            {
+                "Date": date,
+                "Top Return": top_return,
+                "Bottom Return": bottom_return,
+                "Spread": top_return - bottom_return,
+                "IC": safe_spearman(ranked["score"], ranked["forward"]),
+            }
+        )
+    monthly = pd.DataFrame(monthly_rows)
+    if monthly.empty:
+        return {"Prediction IC": np.nan, "Top-Bottom Spread": np.nan, "Top Basket Sharpe": np.nan}
+    top_series = monthly["Top Return"].dropna()
+    top_sharpe = top_series.mean() * 12 / (top_series.std() * np.sqrt(12)) if top_series.std() > 0 else np.nan
+    return {
+        "Prediction IC": monthly["IC"].mean(),
+        "Top-Bottom Spread": monthly["Spread"].mean(),
+        "Top Basket Sharpe": top_sharpe,
+        "Top Basket Net Return Estimate": (1 + top_series - 0.0012).prod() - 1 if not top_series.empty else np.nan,
+    }
+
+
+def tune_stage_a2_hyperparameters(
+    x: pd.DataFrame,
+    y: pd.Series,
+    forward_returns: pd.Series,
+    model_name: str,
+    target_type: str,
+    max_candidates: int = 18,
+) -> tuple[dict, pd.DataFrame]:
+    grid = get_stage_a2_param_grid(model_name)
+    if len(grid) > max_candidates:
+        selection = np.linspace(0, len(grid) - 1, max_candidates, dtype=int)
+        grid = [grid[index] for index in selection]
+    rows = []
+    best_params = {}
+    best_score = -np.inf
+    for params in grid:
+        predictions, _, _ = build_walk_forward_ml_predictions(
+            x,
+            y,
+            model_name,
+            model_params=params,
+            target_type=target_type,
+            min_train_samples=180,
+            min_history_months=12,
+        )
+        signal_metrics = evaluate_prediction_signal(predictions, forward_returns)
+        # Hyperparameter selection uses only walk-forward out-of-sample diagnostics.
+        # The composite keeps spread as the anchor while also rewarding IC, top-basket
+        # Sharpe, and a simple net-return estimate after assumed monthly costs.
+        spread = signal_metrics.get("Top-Bottom Spread", np.nan)
+        ic = signal_metrics.get("Prediction IC", np.nan)
+        sharpe = signal_metrics.get("Top Basket Sharpe", np.nan)
+        net_estimate = signal_metrics.get("Top Basket Net Return Estimate", np.nan)
+        score = (
+            (spread if pd.notna(spread) else 0.0)
+            + 0.01 * (ic if pd.notna(ic) else 0.0)
+            + 0.002 * (sharpe if pd.notna(sharpe) else 0.0)
+            + 0.02 * (net_estimate if pd.notna(net_estimate) else 0.0)
+        )
+        if not np.isfinite(score):
+            score = -np.inf
+        row = {"Model": model_name, "Params": str(params), **signal_metrics, "Selection Score": score}
+        rows.append(row)
+        if score > best_score:
+            best_score = score
+            best_params = params
+    return best_params, pd.DataFrame(rows).sort_values("Selection Score", ascending=False) if rows else pd.DataFrame()
+
+
+def build_signal_diagnostics(
+    predictions: pd.Series,
+    forward_returns: pd.Series,
+    symbol_filter: set[str] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    frame = pd.DataFrame({"score": predictions, "forward": forward_returns.reindex(predictions.index)}).dropna()
+    if symbol_filter is not None and not frame.empty:
+        symbols = frame.index.get_level_values("symbol")
+        frame = frame.loc[symbols.isin(symbol_filter)]
+    rows = []
+    for date, group in frame.groupby(level="date"):
+        ranked = group.sort_values("score", ascending=False)
+        if len(ranked) < 6:
+            continue
+        rows.append(
+            {
+                "Date": date,
+                "Top 3 Avg Forward Return": ranked.head(min(3, len(ranked)))["forward"].mean(),
+                "Top 5 Avg Forward Return": ranked.head(min(5, len(ranked)))["forward"].mean(),
+                "Bottom 3 Avg Forward Return": ranked.tail(min(3, len(ranked)))["forward"].mean(),
+                "Bottom 5 Avg Forward Return": ranked.tail(min(5, len(ranked)))["forward"].mean(),
+                "Top-Bottom 3 Spread": ranked.head(min(3, len(ranked)))["forward"].mean() - ranked.tail(min(3, len(ranked)))["forward"].mean(),
+                "Top-Bottom 5 Spread": ranked.head(min(5, len(ranked)))["forward"].mean() - ranked.tail(min(5, len(ranked)))["forward"].mean(),
+                "Prediction IC": safe_spearman(ranked["score"], ranked["forward"]),
+                "Assets Ranked": len(ranked),
+            }
+        )
+    monthly = pd.DataFrame(rows)
+    summary = pd.DataFrame(
+        [
+            {
+                "Average Top 3 Return": monthly["Top 3 Avg Forward Return"].mean() if not monthly.empty else np.nan,
+                "Average Top 5 Return": monthly["Top 5 Avg Forward Return"].mean() if not monthly.empty else np.nan,
+                "Average Bottom 3 Return": monthly["Bottom 3 Avg Forward Return"].mean() if not monthly.empty else np.nan,
+                "Average Bottom 5 Return": monthly["Bottom 5 Avg Forward Return"].mean() if not monthly.empty else np.nan,
+                "Average Top-Bottom 5 Spread": monthly["Top-Bottom 5 Spread"].mean() if not monthly.empty else np.nan,
+                "Average Prediction IC": monthly["Prediction IC"].mean() if not monthly.empty else np.nan,
+                "Months": len(monthly),
+            }
+        ]
+    )
+    return summary, monthly
+
+
+def build_classification_diagnostics(predictions: pd.Series, y: pd.Series, forward_returns: pd.Series) -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "score": predictions,
+            "actual": y.reindex(predictions.index),
+            "forward": forward_returns.reindex(predictions.index),
+        }
+    ).dropna()
+    if frame.empty:
+        return pd.DataFrame()
+    predicted = frame["score"] >= 0.5
+    actual = frame["actual"] >= 0.5
+    true_positive = (predicted & actual).sum()
+    predicted_positive = predicted.sum()
+    return pd.DataFrame(
+        [
+            {
+                "Classification Accuracy": (predicted == actual).mean(),
+                "Precision": true_positive / predicted_positive if predicted_positive > 0 else np.nan,
+                "Predicted Outperformers": int(predicted_positive),
+                "Avg Forward Return of Predicted Outperformers": frame.loc[predicted, "forward"].mean() if predicted_positive > 0 else np.nan,
+            }
+        ]
+    )
 
 
 def extract_feature_importance(model, feature_names: pd.Index) -> pd.DataFrame:
@@ -485,14 +779,17 @@ def build_stage_a2_portfolios(
     smoothing: float,
     enable_regime_overlay: bool,
     max_drawdown_limit: float,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    turnover_cap: float,
+    rebalance_threshold: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if predictions.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     daily_returns = close.pct_change(fill_method=None).dropna()
     prediction_frame = predictions.rename("score").reset_index().set_index("date")
     month_ends = close.resample("ME").last().index
     strategy_names = ["HRP-style / Risk-Parity Fallback", "Ledoit-Wolf Mean-Variance", "Fractional Kelly", "Beta-Neutral ML"]
     returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
+    gross_returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     previous_weights = {name: pd.Series(0.0, index=close.columns) for name in strategy_names}
     equity_state = {name: 1.0 for name in strategy_names}
     peak_state = {name: 1.0 for name in strategy_names}
@@ -534,6 +831,14 @@ def build_stage_a2_portfolios(
                 smoothing,
                 enable_regime_overlay,
             )
+            previous = previous_weights[strategy_name].reindex(weights.index).fillna(0.0)
+            requested_turnover = (weights - previous).abs().sum()
+            rebalance_skipped = False
+            if requested_turnover < rebalance_threshold:
+                weights = previous
+                rebalance_skipped = True
+            elif requested_turnover > turnover_cap:
+                weights = previous + (weights - previous) * (turnover_cap / requested_turnover)
             cost = apply_square_root_market_impact(weights, previous_weights[strategy_name], base_cost_bps, impact_bps)
             raw_period_returns = daily_returns.loc[period_mask, weights.index].dot(weights)
             period_returns = raw_period_returns.copy()
@@ -558,12 +863,16 @@ def build_stage_a2_portfolios(
                 equity_state[strategy_name] = tentative_equity
                 peak_state[strategy_name] = max(peak_state[strategy_name], equity_state[strategy_name])
             returns_by_strategy[strategy_name].loc[period_mask] = period_returns
+            gross_returns_by_strategy[strategy_name].loc[period_mask] = raw_period_returns
             turnover = (weights - previous_weights[strategy_name]).abs().sum()
             execution_rows.append(
                 {
                     "Date": signal_date,
                     "Portfolio": strategy_name,
                     "Turnover": turnover,
+                    "Requested Turnover": requested_turnover,
+                    "Turnover Cap": turnover_cap,
+                    "Rebalance Skipped": "Yes" if rebalance_skipped else "No",
                     "Market Impact Cost": cost,
                     "Gross Exposure": weights.abs().sum(),
                     "Net Exposure": weights.sum(),
@@ -578,7 +887,7 @@ def build_stage_a2_portfolios(
             )
             previous_weights[strategy_name] = weights
 
-    return pd.DataFrame(returns_by_strategy).dropna(how="all"), pd.DataFrame(execution_rows)
+    return pd.DataFrame(returns_by_strategy).dropna(how="all"), pd.DataFrame(gross_returns_by_strategy).dropna(how="all"), pd.DataFrame(execution_rows)
 
 
 def detect_regime_states(close: pd.DataFrame, benchmark: str = "SPY") -> pd.DataFrame:
@@ -719,8 +1028,12 @@ def run_stage_a2_research(
     smoothing: float,
     enable_regime_overlay: bool,
     max_drawdown_limit: float,
+    turnover_cap: float,
+    rebalance_threshold: float,
+    target_type: str,
+    enable_tuning: bool,
 ):
-    x, y = build_stage_a2_features(close, macro)
+    x, y, forward_returns = build_stage_a2_features(close, macro, target_type=target_type, return_forward_returns=True)
     diagnostics = {
         "Requested Model": model_name,
         "Effective Model": model_name,
@@ -730,6 +1043,10 @@ def run_stage_a2_research(
         "Feature Dates": len(x.index.get_level_values("date").unique()) if not x.empty else 0,
         "Feature Assets": len(x.index.get_level_values("symbol").unique()) if not x.empty else 0,
     }
+    selected_params = {}
+    tuning_results = pd.DataFrame()
+    if enable_tuning and model_name in ["Elastic Net", "Random Forest", "Gradient Boosting"] and not x.empty:
+        selected_params, tuning_results = tune_stage_a2_hyperparameters(x, y, forward_returns, model_name, target_type)
     predictions = pd.Series(dtype=float, name="score")
     walk_log = pd.DataFrame()
     importance_history = pd.DataFrame()
@@ -750,6 +1067,8 @@ def run_stage_a2_research(
                 x,
                 y,
                 candidate_model,
+                model_params=selected_params if candidate_model == model_name else None,
+                target_type=target_type,
                 min_train_samples=min_samples,
                 min_history_months=min_history,
             )
@@ -757,6 +1076,7 @@ def run_stage_a2_research(
             predictions, walk_log, importance_history = pd.Series(dtype=float, name="score"), pd.DataFrame(), pd.DataFrame()
         if not predictions.empty:
             diagnostics["Effective Model"] = candidate_model
+            diagnostics["Selected Hyperparameters"] = str(selected_params or {})
             diagnostics["Min Train Samples"] = min_samples
             diagnostics["Min History Months"] = min_history
             break
@@ -768,7 +1088,10 @@ def run_stage_a2_research(
         diagnostics["Prediction Source"] = "Fallback"
         diagnostics["Fallback Used"] = True
 
-    portfolio_returns, execution = build_stage_a2_portfolios(
+    signal_summary, signal_monthly = build_signal_diagnostics(predictions, forward_returns)
+    etf_signal_summary, etf_signal_monthly = build_signal_diagnostics(predictions, forward_returns, A2_ETF_SYMBOLS)
+    classification_summary = build_classification_diagnostics(predictions, y, forward_returns) if target_type == "Next-month outperform SPY classification" else pd.DataFrame()
+    portfolio_returns, gross_returns, execution = build_stage_a2_portfolios(
         close,
         predictions,
         base_cost_bps,
@@ -778,9 +1101,30 @@ def run_stage_a2_research(
         smoothing,
         enable_regime_overlay,
         max_drawdown_limit,
+        turnover_cap,
+        rebalance_threshold,
     )
     if portfolio_returns.empty:
-        return x, predictions, walk_log, importance_history, portfolio_returns, execution, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), diagnostics
+        return (
+            x,
+            predictions,
+            walk_log,
+            importance_history,
+            portfolio_returns,
+            gross_returns,
+            execution,
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            pd.DataFrame(),
+            diagnostics,
+            signal_summary,
+            signal_monthly,
+            etf_signal_summary,
+            etf_signal_monthly,
+            tuning_results,
+            classification_summary,
+        )
     benchmark = close["SPY"].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0) if "SPY" in close else None
     metrics = calculate_metrics(portfolio_returns, benchmark)
     regimes = detect_regime_states(close)
@@ -788,7 +1132,26 @@ def run_stage_a2_research(
     exposures = factor_exposure_heatmap(portfolio_returns, close)
     diagnostics["Prediction Count"] = len(predictions)
     diagnostics["Portfolio Return Rows"] = len(portfolio_returns)
-    return x, predictions, walk_log, importance_history, portfolio_returns, execution, metrics, regimes, stress, exposures, diagnostics
+    return (
+        x,
+        predictions,
+        walk_log,
+        importance_history,
+        portfolio_returns,
+        gross_returns,
+        execution,
+        metrics,
+        regimes,
+        stress,
+        exposures,
+        diagnostics,
+        signal_summary,
+        signal_monthly,
+        etf_signal_summary,
+        etf_signal_monthly,
+        tuning_results,
+        classification_summary,
+    )
 
 
 def render_stage_a2_dashboard(stock_universe_file) -> None:
@@ -815,6 +1178,10 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         smoothing = st.slider("Weight smoothing", min_value=0.00, max_value=0.80, value=0.25, step=0.05)
         enable_regime_overlay = st.toggle("Regime risk overlay", value=False)
         max_drawdown_limit = st.slider("Max drawdown guard", min_value=0.05, max_value=0.25, value=0.15, step=0.01)
+        turnover_cap = st.slider("Monthly turnover cap", min_value=0.25, max_value=2.00, value=0.75, step=0.05)
+        rebalance_threshold = st.slider("Rebalance threshold", min_value=0.00, max_value=0.25, value=0.03, step=0.01)
+        target_type = st.selectbox("Prediction target", TARGET_TYPES, index=0)
+        enable_tuning = st.toggle("Walk-forward hyperparameter tuning", value=False)
 
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=years)
@@ -828,7 +1195,26 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         return
 
     with st.spinner("Training walk-forward ML models and building A2 portfolios..."):
-        x, predictions, walk_log, importance_history, portfolio_returns, execution, metrics, regimes, stress, exposures, diagnostics = run_stage_a2_research(
+        (
+            x,
+            predictions,
+            walk_log,
+            importance_history,
+            portfolio_returns,
+            gross_returns,
+            execution,
+            metrics,
+            regimes,
+            stress,
+            exposures,
+            diagnostics,
+            signal_summary,
+            signal_monthly,
+            etf_signal_summary,
+            etf_signal_monthly,
+            tuning_results,
+            classification_summary,
+        ) = run_stage_a2_research(
             close,
             macro,
             model_name,
@@ -839,6 +1225,10 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             smoothing,
             enable_regime_overlay,
             max_drawdown_limit,
+            turnover_cap,
+            rebalance_threshold,
+            target_type,
+            enable_tuning,
         )
         if portfolio_returns.empty:
             st.error("Not enough walk-forward predictions to build Stage A2 portfolios.")
@@ -856,8 +1246,8 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     elif diagnostics.get("Effective Model") != diagnostics.get("Requested Model"):
         st.info(f"A2 used {diagnostics.get('Effective Model')} after the requested model produced insufficient predictions.")
 
-    performance_tab, model_tab, regime_tab, risk_tab, execution_tab, paper_tab = st.tabs(
-        ["Performance", "White-Box ML", "Regime States", "Risk & Stress", "Execution", "Working Paper #2"]
+    performance_tab, diagnostics_tab, model_tab, regime_tab, risk_tab, execution_tab, paper_tab = st.tabs(
+        ["Performance", "ML Signal Diagnostics", "White-Box ML", "Regime States", "Risk & Stress", "Execution", "Working Paper #2"]
     )
 
     with performance_tab:
@@ -900,6 +1290,137 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         st.plotly_chart(px.line(dollar_equity, x=dollar_equity.index, y=dollar_equity.columns, title="$1,000,000 A2 Equity Curve"), use_container_width=True)
         drawdown = equity / equity.cummax() - 1
         st.plotly_chart(px.line(drawdown, x=drawdown.index, y=drawdown.columns, title="Rolling Drawdown"), use_container_width=True)
+
+    with diagnostics_tab:
+        st.subheader("Stage A2 ML Signal Diagnostics")
+        gross_metrics = calculate_metrics(gross_returns, benchmark) if not gross_returns.empty else pd.DataFrame()
+        if not gross_metrics.empty:
+            gross_net = metrics[["Series", "Total Return", "Sharpe", "Max Drawdown"]].merge(
+                gross_metrics[["Series", "Total Return", "Sharpe", "Max Drawdown"]],
+                on="Series",
+                suffixes=(" Net", " Gross"),
+            )
+            gross_net["Transaction Cost / Guard Drag"] = gross_net["Total Return Gross"] - gross_net["Total Return Net"]
+            st.dataframe(
+                gross_net.style.format(
+                    {
+                        "Total Return Net": "{:.2%}",
+                        "Sharpe Net": "{:.2f}",
+                        "Max Drawdown Net": "{:.2%}",
+                        "Total Return Gross": "{:.2%}",
+                        "Sharpe Gross": "{:.2f}",
+                        "Max Drawdown Gross": "{:.2%}",
+                        "Transaction Cost / Guard Drag": "{:.2%}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not signal_summary.empty:
+            st.subheader("Prediction Spread Quality: Ranked Assets")
+            st.dataframe(
+                signal_summary.style.format(
+                    {
+                        "Average Top 3 Return": "{:.2%}",
+                        "Average Top 5 Return": "{:.2%}",
+                        "Average Bottom 3 Return": "{:.2%}",
+                        "Average Bottom 5 Return": "{:.2%}",
+                        "Average Top-Bottom 5 Spread": "{:.2%}",
+                        "Average Prediction IC": "{:.3f}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not etf_signal_summary.empty:
+            st.subheader("Prediction Spread Quality: ETF / Global Proxy Subset")
+            st.dataframe(
+                etf_signal_summary.style.format(
+                    {
+                        "Average Top 3 Return": "{:.2%}",
+                        "Average Top 5 Return": "{:.2%}",
+                        "Average Bottom 3 Return": "{:.2%}",
+                        "Average Bottom 5 Return": "{:.2%}",
+                        "Average Top-Bottom 5 Spread": "{:.2%}",
+                        "Average Prediction IC": "{:.3f}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not classification_summary.empty:
+            st.subheader("Classification Target Diagnostics")
+            st.dataframe(
+                classification_summary.style.format(
+                    {
+                        "Classification Accuracy": "{:.2%}",
+                        "Precision": "{:.2%}",
+                        "Avg Forward Return of Predicted Outperformers": "{:.2%}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not signal_monthly.empty:
+            st.plotly_chart(px.line(signal_monthly, x="Date", y=["Top-Bottom 5 Spread", "Prediction IC"], title="Monthly Prediction Spread and IC"), use_container_width=True)
+            st.dataframe(signal_monthly.tail(24).style.format({column: "{:.2%}" for column in signal_monthly.columns if "Return" in column or "Spread" in column}), use_container_width=True, hide_index=True)
+        if not etf_signal_monthly.empty:
+            st.plotly_chart(
+                px.line(etf_signal_monthly, x="Date", y=["Top-Bottom 5 Spread", "Prediction IC"], title="ETF / Global Proxy Monthly Spread and IC"),
+                use_container_width=True,
+            )
+        st.subheader("Monthly Turnover and Cost Drag")
+        if execution.empty:
+            st.info("No execution rows are available for turnover diagnostics.")
+        else:
+            monthly_execution = execution.groupby(["Date", "Portfolio"], as_index=False).agg(
+                Turnover=("Turnover", "mean"),
+                Requested_Turnover=("Requested Turnover", "mean"),
+                Estimated_Cost=("Market Impact Cost", "sum"),
+                Rebalance_Skipped=("Rebalance Skipped", lambda values: int((values == "Yes").sum())),
+            )
+            st.dataframe(
+                monthly_execution.tail(48).style.format(
+                    {
+                        "Turnover": "{:.2f}x",
+                        "Requested_Turnover": "{:.2f}x",
+                        "Estimated_Cost": "{:.2%}",
+                        "Rebalance_Skipped": "{:.0f}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        st.subheader("Prediction Source and Fallback")
+        st.write(f"Prediction source: **{diagnostics.get('Prediction Source', 'ML')}**")
+        fallback_count = int((walk_log["Prediction Source"] == "Fallback").sum()) if not walk_log.empty and "Prediction Source" in walk_log else 0
+        st.metric("Fallback Months", fallback_count)
+        if not walk_log.empty and "Train IC" in walk_log and not signal_summary.empty:
+            train_ic = walk_log["Train IC"].mean()
+            oos_ic = signal_summary["Average Prediction IC"].iloc[0]
+            if pd.notna(train_ic) and pd.notna(oos_ic) and train_ic - oos_ic > 0.15:
+                st.warning(f"Overfitting warning: average train IC ({train_ic:.3f}) is much higher than OOS IC ({oos_ic:.3f}).")
+        st.subheader("Selected Hyperparameters")
+        st.write(diagnostics.get("Selected Hyperparameters", "{}"))
+        if not tuning_results.empty:
+            st.dataframe(
+                tuning_results.head(20).style.format(
+                    {
+                        "Prediction IC": "{:.3f}",
+                        "Top-Bottom Spread": "{:.2%}",
+                        "Top Basket Sharpe": "{:.2f}",
+                        "Top Basket Net Return Estimate": "{:.2%}",
+                        "Selection Score": "{:.4f}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not importance_history.empty:
+            stability = importance_history.groupby("Feature")["Importance"].agg(["mean", "std"]).reset_index()
+            stability["Stability Ratio"] = stability["mean"] / stability["std"].replace(0, np.nan)
+            st.subheader("Feature Importance Stability")
+            st.dataframe(stability.sort_values("mean", ascending=False).head(20).style.format({"mean": "{:.3f}", "std": "{:.3f}", "Stability Ratio": "{:.2f}"}), use_container_width=True, hide_index=True)
 
     with model_tab:
         st.subheader("Feature Importance Tracking")

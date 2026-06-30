@@ -34,6 +34,35 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 Both labs use walk-forward logic: each prediction month trains only on data before that month, then trades the following period. Dashboard performance is intended for research and education, not live investment advice.
 
+## Stage A2 ML Ranking Pipeline
+
+Stage A2 ranks assets each month with a white-box ML model, then passes the ranking scores into the existing HRP-style, Ledoit-Wolf, fractional Kelly, and beta-neutral portfolios. It does not use random K-fold validation. The optional hyperparameter tuner uses time-series-aware walk-forward validation only.
+
+Stage A2 feature groups include:
+
+- Momentum and relative strength: 1M/3M/6M/12M returns, returns relative to SPY, cross-sectional momentum rank.
+- Risk and drawdown: rolling volatility, drawdown, volatility rank, drawdown rank.
+- Trend and regime: SPY above 200-day MA, asset above 200-day MA, 50D/200D ratio, market drawdown, risk-off dummy.
+- Correlation and beta: rolling beta/correlation to SPY and correlation to TLT.
+- Macro when available: Treasury yields, 2Y-10Y spread, Fed funds, CPI YoY, unemployment, industrial production YoY, financial stress. Macro fields are lagged by one month as a conservative timing proxy.
+
+Supported targets:
+
+- Next-month raw return
+- Next-month excess return versus SPY
+- Next-month outperform-SPY classification
+- Next-month cross-sectional rank percentile
+
+The diagnostics tab shows top-minus-bottom prediction spread for all ranked assets and the ETF/global-proxy subset, prediction IC, gross-vs-net performance, transaction-cost drag, monthly turnover, fallback months, selected hyperparameters, and feature-importance stability.
+
+Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
+
+- Monthly returns are noisy and hard to predict.
+- The default universe can still be sector-concentrated depending on `stock_universe.csv`.
+- Strict walk-forward validation removes look-ahead benefits that weaker backtests sometimes contain.
+- Transaction costs, square-root impact, turnover controls, and drawdown guards reduce upside.
+- ML ranking alpha may be weaker than simple trend/beta exposure in strong bull markets.
+
 ## Limitations and Fallbacks
 
 - Historical index membership is not point-in-time survivorship-bias-free.
@@ -43,7 +72,7 @@ Both labs use walk-forward logic: each prediction month trains only on data befo
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.
 - A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest and Gradient Boosting remain available as heavier alternatives.
 - A2 includes risk controls: volatility targeting, optional regime exposure scaling, weight smoothing, and a daily-bar max drawdown guard. These are designed to reduce drawdown and turnover, not to guarantee a higher Sharpe ratio in every sample.
-- A1 and A2 performance shown in the dashboard is net of estimated costs; full gross-vs-net attribution is still a known extension.
+- A1 and A2 headline performance is net of estimated costs. A2 also shows gross-vs-net attribution in the ML diagnostics tab.
 - Stress windows show "Not enough data" when the selected history does not overlap 2008, 2020, or 2022.
 
 ## ETF Universe
