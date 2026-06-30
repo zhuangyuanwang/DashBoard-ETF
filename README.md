@@ -44,7 +44,9 @@ The dashboard automatically:
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Compares HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML.
 - Recommends the portfolio method by OOS Sharpe, then drawdown, turnover, and cost drag.
-- Shows current holdings, model explanation, risk diagnostics, stress tests, and methodology in presentation tabs.
+- Shows current holdings, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
+
+The Stage A2 **Performance Diagnostics** tab is deliberately honest when ML underperforms SPY. It compares the recommended ML strategy against SPY buy-and-hold, equal-weight ETFs, 12-month momentum top 5, and dual momentum; reports ML ranking spread and prediction IC; separates gross and net performance; checks rank turnover, target choice, feature ablations, overfitting risk, and portfolio construction effects.
 
 XGBoost, LightGBM, SHAP, and hmmlearn are supported as optional engines. If those packages are not installed or are incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
 

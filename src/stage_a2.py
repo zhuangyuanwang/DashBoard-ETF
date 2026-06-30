@@ -1471,6 +1471,391 @@ def monthly_return_table(returns: pd.Series) -> pd.DataFrame:
     return table.pivot(index="Year", columns="Month", values="Return")
 
 
+def format_diagnostic_metrics(
+    returns_map: dict[str, pd.Series],
+    benchmark: pd.Series | None = None,
+    turnover_map: dict[str, float] | None = None,
+    cost_drag_map: dict[str, float] | None = None,
+) -> pd.DataFrame:
+    frames = []
+    for name, series in returns_map.items():
+        clean = series.dropna()
+        if clean.empty:
+            continue
+        metrics = calculate_metrics(clean.to_frame(name), benchmark).rename(columns={"Series": "Strategy"})
+        metrics["Turnover"] = (turnover_map or {}).get(name, np.nan)
+        metrics["Transaction Cost Drag"] = (cost_drag_map or {}).get(name, np.nan)
+        frames.append(metrics)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).rename(
+        columns={"CAGR": "Annualized Return", "Annual Volatility": "Annualized Volatility"}
+    )
+
+
+def backtest_simple_rotation_benchmark(
+    close: pd.DataFrame,
+    method: str,
+    top_n: int = 5,
+    base_cost_bps: float = 10.0,
+) -> tuple[pd.Series, pd.Series, pd.DataFrame]:
+    daily_returns = close.pct_change(fill_method=None).dropna()
+    month_ends = close.resample("ME").last().index
+    net = pd.Series(0.0, index=daily_returns.index)
+    gross = pd.Series(0.0, index=daily_returns.index)
+    previous = pd.Series(0.0, index=close.columns)
+    rows = []
+    for idx in range(12, len(month_ends) - 1):
+        signal_date = month_ends[idx]
+        next_date = month_ends[idx + 1]
+        period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_date)
+        if not period_mask.any():
+            continue
+        weights = pd.Series(0.0, index=close.columns)
+        if method == "SPY Buy-and-Hold":
+            if "SPY" in weights.index:
+                weights["SPY"] = 1.0
+        elif method == "Equal-Weight ETF Universe":
+            weights[:] = 1.0 / len(weights)
+        else:
+            lookback_return = close.loc[:signal_date].iloc[-1] / close.loc[:signal_date].iloc[max(0, len(close.loc[:signal_date]) - 252)] - 1
+            ranked = lookback_return.dropna().sort_values(ascending=False)
+            selected = ranked.head(top_n).index.tolist()
+            if method == "Dual Momentum Top 5":
+                selected = [symbol for symbol in selected if ranked.get(symbol, 0.0) > 0]
+                if not selected:
+                    defensive = [symbol for symbol in ["IEF", "TLT", "SPY"] if symbol in close.columns]
+                    selected = defensive[:1] if defensive else ranked.head(1).index.tolist()
+            if selected:
+                weights[selected] = 1.0 / len(selected)
+        cost = (weights - previous).abs().sum() * base_cost_bps / 10000
+        raw = daily_returns.loc[period_mask, weights.index].dot(weights)
+        period = raw.copy()
+        if not period.empty:
+            period.iloc[0] -= cost
+        gross.loc[period_mask] = raw
+        net.loc[period_mask] = period
+        rows.append({"Date": signal_date, "Strategy": method, "Turnover": (weights - previous).abs().sum(), "Cost Drag": cost})
+        previous = weights
+    return net, gross, pd.DataFrame(rows)
+
+
+def build_stage_a2_benchmark_comparison(close: pd.DataFrame, recommended_returns: pd.Series, benchmark: pd.Series | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    returns_map = {"Stage A2 Recommended ML": recommended_returns}
+    turnover_map = {"Stage A2 Recommended ML": np.nan}
+    cost_drag_map = {"Stage A2 Recommended ML": np.nan}
+    execution_rows = []
+    for method in ["SPY Buy-and-Hold", "Equal-Weight ETF Universe", "12M Momentum Top 5", "Dual Momentum Top 5"]:
+        net, gross, execution = backtest_simple_rotation_benchmark(
+            close,
+            method,
+            top_n=int(STAGE_A2_PRESENTATION_CONFIG["Top-N ETFs"]),
+            base_cost_bps=float(STAGE_A2_PRESENTATION_CONFIG["Transaction Cost Bps"]),
+        )
+        returns_map[method] = net.reindex(recommended_returns.index).fillna(0.0)
+        turnover_map[method] = execution["Turnover"].mean() if not execution.empty else np.nan
+        gross_total = (1 + gross.reindex(recommended_returns.index).fillna(0.0)).prod() - 1
+        net_total = (1 + returns_map[method]).prod() - 1
+        cost_drag_map[method] = gross_total - net_total
+        execution_rows.append(execution)
+    table = format_diagnostic_metrics(returns_map, benchmark, turnover_map, cost_drag_map)
+    execution = pd.concat(execution_rows, ignore_index=True) if execution_rows else pd.DataFrame()
+    return table, execution
+
+
+def build_ranking_stability(predictions: pd.Series, top_n: int = 5) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if predictions.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    rows = []
+    previous_top = set()
+    holding_streaks: dict[str, int] = {}
+    completed = []
+    for date, group in predictions.groupby(level="date"):
+        ranked = group.sort_values(ascending=False)
+        top = [idx[1] for idx in ranked.head(top_n).index]
+        top_set = set(top)
+        for symbol in list(holding_streaks):
+            if symbol in top_set:
+                holding_streaks[symbol] += 1
+            else:
+                completed.append(holding_streaks.pop(symbol))
+        for symbol in top_set:
+            holding_streaks.setdefault(symbol, 1)
+        overlap = len(top_set & previous_top) if previous_top else np.nan
+        rows.append(
+            {
+                "Date": date,
+                "Top ETFs": ", ".join(top),
+                "Top-5 Changed": np.nan if not previous_top else int(top_set != previous_top),
+                "Rank Turnover": np.nan if not previous_top else 1 - overlap / top_n,
+                "Top-5 Overlap": overlap,
+            }
+        )
+        previous_top = top_set
+    completed.extend(holding_streaks.values())
+    monthly = pd.DataFrame(rows)
+    summary = pd.DataFrame(
+        [
+            {
+                "Current Top-Ranked ETFs": monthly["Top ETFs"].iloc[-1] if not monthly.empty else "",
+                "Previous Month Top-Ranked ETFs": monthly["Top ETFs"].iloc[-2] if len(monthly) > 1 else "",
+                "Average Rank Turnover": monthly["Rank Turnover"].mean() if not monthly.empty else np.nan,
+                "Top-5 Basket Change Rate": monthly["Top-5 Changed"].mean() if not monthly.empty else np.nan,
+                "Average Holding Period Months": np.mean(completed) if completed else np.nan,
+            }
+        ]
+    )
+    return summary, monthly
+
+
+def backtest_ml_equal_weight_top_n(
+    close: pd.DataFrame,
+    predictions: pd.Series,
+    top_n: int = 5,
+    base_cost_bps: float = 10.0,
+) -> tuple[pd.Series, pd.Series, pd.DataFrame]:
+    if predictions.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float), pd.DataFrame()
+    daily_returns = close.pct_change(fill_method=None).dropna()
+    month_ends = close.resample("ME").last().index
+    prediction_frame = predictions.rename("score").reset_index().set_index("date")
+    net = pd.Series(0.0, index=daily_returns.index)
+    gross = pd.Series(0.0, index=daily_returns.index)
+    previous = pd.Series(0.0, index=close.columns)
+    rows = []
+    for idx in range(12, len(month_ends) - 1):
+        signal_date = month_ends[idx]
+        next_date = month_ends[idx + 1]
+        available_dates = prediction_frame.index[prediction_frame.index <= signal_date]
+        if len(available_dates) == 0:
+            continue
+        signal_rows = prediction_frame.loc[available_dates[-1]]
+        if isinstance(signal_rows, pd.Series):
+            signal_rows = signal_rows.to_frame().T
+        top = signal_rows.set_index("symbol")["score"].sort_values(ascending=False).head(top_n).index
+        weights = pd.Series(0.0, index=close.columns)
+        tradable = [symbol for symbol in top if symbol in weights.index]
+        if not tradable:
+            continue
+        weights[tradable] = 1.0 / len(tradable)
+        period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_date)
+        if not period_mask.any():
+            continue
+        cost = (weights - previous).abs().sum() * base_cost_bps / 10000
+        raw = daily_returns.loc[period_mask, weights.index].dot(weights)
+        period = raw.copy()
+        if not period.empty:
+            period.iloc[0] -= cost
+        gross.loc[period_mask] = raw
+        net.loc[period_mask] = period
+        rows.append({"Date": signal_date, "Portfolio": "Equal-Weight ML Top 5", "Turnover": (weights - previous).abs().sum(), "Market Impact Cost": cost})
+        previous = weights
+    return net, gross, pd.DataFrame(rows)
+
+
+def feature_columns_for_group(columns: pd.Index, group: str) -> list[str]:
+    columns = list(columns)
+    if group == "momentum only":
+        keys = ["ret_1m", "ret_3m", "ret_6m", "ret_12m", "relative_ret", "momentum_rank", "market_ret"]
+    elif group == "trend only":
+        keys = ["above_200d", "ma50", "spy_trend", "risk_off", "market_drawdown"]
+    elif group == "volatility/drawdown only":
+        keys = ["vol", "drawdown"]
+    elif group == "macro only":
+        keys = ["macro_"]
+    elif group == "momentum + trend":
+        keys = ["ret_1m", "ret_3m", "ret_6m", "ret_12m", "relative_ret", "momentum_rank", "market_ret", "above_200d", "ma50", "spy_trend", "risk_off", "market_drawdown"]
+    else:
+        return columns
+    selected = [column for column in columns if any(key in column for key in keys)]
+    return selected or columns
+
+
+def run_stage_a2_feature_subset_diagnostic(
+    close: pd.DataFrame,
+    macro: pd.DataFrame,
+    model_name: str,
+    feature_group: str,
+    benchmark: pd.Series | None,
+) -> dict:
+    config = STAGE_A2_PRESENTATION_CONFIG
+    x, y, forward = build_stage_a2_features(close, macro, target_type=config["Target Type"], return_forward_returns=True)
+    columns = feature_columns_for_group(x.columns, feature_group)
+    x = x[columns]
+    predictions, walk_log, _ = build_walk_forward_ml_predictions(
+        x,
+        y,
+        model_name,
+        target_type=config["Target Type"],
+        min_train_samples=80,
+        min_history_months=9,
+        collect_importance=False,
+    )
+    signal_summary, _ = build_signal_diagnostics(predictions, forward)
+    portfolio_returns, _, execution, _ = build_stage_a2_portfolios(
+        close,
+        predictions,
+        config["Transaction Cost Bps"],
+        config["Square-Root Impact Bps"],
+        config["Kelly Fraction"],
+        config["Target Volatility"],
+        0.0,
+        config["Regime Overlay"],
+        config["Max Drawdown Guard"],
+        config["Monthly Turnover Cap"],
+        config["Rebalance Threshold"],
+        int(config["Top-N ETFs"]),
+    )
+    if portfolio_returns.empty:
+        return {"Feature Group": feature_group}
+    metrics = calculate_metrics(portfolio_returns, benchmark)
+    best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
+    return {
+        "Feature Group": feature_group,
+        "Best Portfolio": best["Series"],
+        "OOS Sharpe": best["Sharpe"],
+        "OOS Return": best["Total Return"],
+        "Max Drawdown": best["Max Drawdown"],
+        "Top-Minus-Bottom Spread": signal_summary["Average Top-Bottom 5 Spread"].iloc[0] if not signal_summary.empty else np.nan,
+        "Prediction IC": signal_summary["Average Prediction IC"].iloc[0] if not signal_summary.empty else np.nan,
+        "Average Turnover": execution["Turnover"].mean() if not execution.empty else np.nan,
+        "Train IC": walk_log["Train IC"].mean() if not walk_log.empty and "Train IC" in walk_log else np.nan,
+    }
+
+
+def run_stage_a2_target_diagnostic(close: pd.DataFrame, macro: pd.DataFrame, model_name: str, benchmark: pd.Series | None) -> pd.DataFrame:
+    rows = []
+    config = STAGE_A2_PRESENTATION_CONFIG
+    for target in TARGET_TYPES:
+        result = run_stage_a2_research(
+            close,
+            macro,
+            model_name,
+            config["Transaction Cost Bps"],
+            config["Square-Root Impact Bps"],
+            config["Kelly Fraction"],
+            config["Target Volatility"],
+            0.0,
+            config["Regime Overlay"],
+            config["Max Drawdown Guard"],
+            config["Monthly Turnover Cap"],
+            config["Rebalance Threshold"],
+            target,
+            False,
+            collect_importance=False,
+            top_n=int(config["Top-N ETFs"]),
+        )
+        metrics = result[8]
+        signal_summary = result[13]
+        execution = result[6]
+        if metrics.empty:
+            rows.append({"Target": target})
+            continue
+        best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
+        rows.append(
+            {
+                "Target": target,
+                "Best Portfolio": best["Series"],
+                "OOS Sharpe": best["Sharpe"],
+                "OOS Return": best["Total Return"],
+                "Max Drawdown": best["Max Drawdown"],
+                "Top-Minus-Bottom Spread": signal_summary["Average Top-Bottom 5 Spread"].iloc[0] if not signal_summary.empty else np.nan,
+                "Prediction IC": signal_summary["Average Prediction IC"].iloc[0] if not signal_summary.empty else np.nan,
+                "Average Turnover": execution["Turnover"].mean() if not execution.empty else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_stage_a2_performance_diagnostics(close: pd.DataFrame, macro: pd.DataFrame, bundle: dict) -> dict:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    benchmark = bundle["benchmark"]
+    recommended_returns = result[4][recommended]
+    benchmark_table, simple_execution = build_stage_a2_benchmark_comparison(close, recommended_returns, benchmark)
+    if not benchmark_table.empty:
+        ml_mask = benchmark_table["Strategy"].eq("Stage A2 Recommended ML")
+        method_execution = result[6][result[6]["Portfolio"].eq(recommended)] if not result[6].empty else pd.DataFrame()
+        benchmark_table.loc[ml_mask, "Turnover"] = method_execution["Turnover"].mean() if not method_execution.empty else np.nan
+        if recommended in result[5]:
+            gross_total = (1 + result[5][recommended].reindex(recommended_returns.index).fillna(0.0)).prod() - 1
+            net_total = (1 + recommended_returns).prod() - 1
+            benchmark_table.loc[ml_mask, "Transaction Cost Drag"] = gross_total - net_total
+    ranking_summary, ranking_monthly = build_ranking_stability(result[1], int(STAGE_A2_PRESENTATION_CONFIG["Top-N ETFs"]))
+    ml_equal_net, ml_equal_gross, ml_equal_execution = backtest_ml_equal_weight_top_n(
+        close,
+        result[1],
+        int(STAGE_A2_PRESENTATION_CONFIG["Top-N ETFs"]),
+        float(STAGE_A2_PRESENTATION_CONFIG["Transaction Cost Bps"]),
+    )
+    ml_equal_metrics = format_diagnostic_metrics(
+        {"Equal-Weight ML Top 5": ml_equal_net.reindex(recommended_returns.index).fillna(0.0)},
+        benchmark,
+        {"Equal-Weight ML Top 5": ml_equal_execution["Turnover"].mean() if not ml_equal_execution.empty else np.nan},
+        {"Equal-Weight ML Top 5": ((1 + ml_equal_gross.reindex(recommended_returns.index).fillna(0.0)).prod() - 1) - ((1 + ml_equal_net.reindex(recommended_returns.index).fillna(0.0)).prod() - 1)},
+    )
+    target_comparison = run_stage_a2_target_diagnostic(close, macro, bundle["selected_model"], benchmark)
+    feature_ablation = pd.DataFrame(
+        [
+            run_stage_a2_feature_subset_diagnostic(close, macro, bundle["selected_model"], group, benchmark)
+            for group in ["momentum only", "trend only", "volatility/drawdown only", "macro only", "momentum + trend", "all features"]
+        ]
+    )
+    model_winners = []
+    monthly_frames = []
+    for model_name, model_result in bundle["model_results"].items():
+        monthly = model_result[14].copy()
+        if not monthly.empty:
+            monthly["Model"] = model_name
+            monthly_frames.append(monthly)
+    if monthly_frames:
+        combined = pd.concat(monthly_frames, ignore_index=True)
+        for date, group in combined.groupby("Date"):
+            best = group.sort_values("Top-Bottom 5 Spread", ascending=False).iloc[0]
+            model_winners.append({"Date": date, "Monthly Best Model": best["Model"]})
+    model_winners = pd.DataFrame(model_winners)
+    model_change_rate = model_winners["Monthly Best Model"].ne(model_winners["Monthly Best Model"].shift()).mean() if not model_winners.empty else np.nan
+    return {
+        "benchmark_table": benchmark_table,
+        "simple_execution": simple_execution,
+        "ranking_summary": ranking_summary,
+        "ranking_monthly": ranking_monthly,
+        "ml_equal_top5_metrics": ml_equal_metrics,
+        "ml_equal_top5_execution": ml_equal_execution,
+        "target_comparison": target_comparison,
+        "feature_ablation": feature_ablation,
+        "model_winners": model_winners,
+        "model_change_rate": model_change_rate,
+    }
+
+
+def stage_a2_plain_english_diagnosis(bundle: dict, diagnostics: dict) -> list[str]:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    metrics = result[8]
+    signal_summary = result[13]
+    execution = result[6]
+    benchmark_table = diagnostics["benchmark_table"]
+    rows = []
+    spread = signal_summary["Average Top-Bottom 5 Spread"].iloc[0] if not signal_summary.empty else np.nan
+    rows.append(f"ML signal has {'positive' if pd.notna(spread) and spread > 0 else 'negative or weak'} ranking spread: average top-minus-bottom 5 spread is {spread:.2%}." if pd.notna(spread) else "ML signal spread is unavailable.")
+    if not execution.empty:
+        avg_turnover = execution.loc[execution["Portfolio"].eq(recommended), "Turnover"].mean()
+        rows.append(f"Average monthly turnover for the recommended portfolio is {avg_turnover:.2f}x, so transaction costs can materially reduce returns." if pd.notna(avg_turnover) and avg_turnover > 0.5 else f"Average turnover is {avg_turnover:.2f}x, so cost drag is not the only explanation.")
+    if not benchmark_table.empty and "SPY Buy-and-Hold" in benchmark_table["Strategy"].values:
+        ml_return = metrics.loc[metrics["Series"].eq(recommended), "Total Return"].iloc[0]
+        spy_return = benchmark_table.loc[benchmark_table["Strategy"].eq("SPY Buy-and-Hold"), "Total Return"].iloc[0]
+        rows.append("ML underperforms SPY because the period favored buy-and-hold equity beta." if ml_return < spy_return else "ML outperformed SPY on total return in this sample.")
+    if not benchmark_table.empty and "12M Momentum Top 5" in benchmark_table["Strategy"].values:
+        ml_return = metrics.loc[metrics["Series"].eq(recommended), "Total Return"].iloc[0]
+        mom_return = benchmark_table.loc[benchmark_table["Strategy"].eq("12M Momentum Top 5"), "Total Return"].iloc[0]
+        rows.append("Current ML model does not add value over the simple 12-month momentum benchmark." if ml_return < mom_return else "Current ML model adds value over the simple 12-month momentum benchmark in this sample.")
+    target = diagnostics["target_comparison"].sort_values("OOS Sharpe", ascending=False).head(1)
+    if not target.empty:
+        rows.append(f"Recommended next improvement: review target choice. Best diagnostic target by OOS Sharpe is '{target.iloc[0]['Target']}', but this is diagnostic only and was not used to retroactively optimize the final model.")
+    return rows
+
+
 def compare_stress_to_spy(strategy_returns: pd.Series, benchmark: pd.Series | None) -> pd.DataFrame:
     windows = {
         "2008 Crisis": ("2008-01-01", "2009-03-31"),
@@ -1531,7 +1916,7 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame)
         selected_result[8], selected_result[5], selected_result[6], benchmark
     )
     holdings = get_stage_a2_current_holdings(selected_result[7], selected_result[1], recommended_method, selected_result[3])
-    return {
+    bundle = {
         "config": config,
         "model_results": model_results,
         "selected_model": selected_model,
@@ -1544,6 +1929,8 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame)
         "current_holdings": holdings,
         "benchmark": benchmark,
     }
+    bundle["performance_diagnostics"] = build_stage_a2_performance_diagnostics(close, macro, bundle)
+    return bundle
 
 
 def render_stage_a2_executive_overview(bundle: dict) -> None:
@@ -1651,6 +2038,179 @@ def render_stage_a2_portfolio_performance(bundle: dict) -> None:
         use_container_width=True,
         hide_index=True,
     )
+
+
+def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    diagnostics = bundle["performance_diagnostics"]
+    benchmark = bundle["benchmark"]
+    returns = result[4]
+    gross_returns = result[5]
+    execution = result[6]
+    signal_monthly = result[14]
+    importance = result[3]
+
+    st.subheader("Plain-English Diagnosis")
+    for item in stage_a2_plain_english_diagnosis(bundle, diagnostics):
+        st.info(item)
+
+    st.subheader("Benchmark Comparison")
+    benchmark_table = diagnostics["benchmark_table"].copy()
+    if not benchmark_table.empty:
+        st.dataframe(
+            benchmark_table[["Strategy", "Total Return", "Annualized Return", "Annualized Volatility", "Sharpe", "Sortino", "Calmar", "Max Drawdown", "Turnover", "Transaction Cost Drag"]].style.format(
+                {
+                    "Total Return": "{:.2%}",
+                    "Annualized Return": "{:.2%}",
+                    "Annualized Volatility": "{:.2%}",
+                    "Sharpe": "{:.2f}",
+                    "Sortino": "{:.2f}",
+                    "Calmar": "{:.2f}",
+                    "Max Drawdown": "{:.2%}",
+                    "Turnover": "{:.2f}x",
+                    "Transaction Cost Drag": "{:.2%}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    if benchmark is not None:
+        st.caption("Benchmark table is calculated over the same available OOS return window as the Stage A2 recommended portfolio.")
+
+    st.subheader("ML Signal Quality")
+    if signal_monthly.empty:
+        st.warning("Monthly signal quality table is unavailable.")
+    else:
+        signal = signal_monthly.copy()
+        signal["Rolling Top-Bottom 5 Spread"] = signal["Top-Bottom 5 Spread"].rolling(6).mean()
+        signal["Rolling Prediction IC"] = signal["Prediction IC"].rolling(6).mean()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Avg Top-Bottom 5 Spread", f"{signal['Top-Bottom 5 Spread'].mean():.2%}")
+        c2.metric("Positive Spread Hit Rate", f"{(signal['Top-Bottom 5 Spread'] > 0).mean():.1%}")
+        c3.metric("Avg Prediction IC", f"{signal['Prediction IC'].mean():.3f}")
+        st.plotly_chart(px.line(signal, x="Date", y=["Rolling Top-Bottom 5 Spread", "Rolling Prediction IC"], title="Rolling ML Signal Quality"), use_container_width=True)
+        st.dataframe(
+            signal[["Date", "Top 3 Avg Forward Return", "Top 5 Avg Forward Return", "Bottom 3 Avg Forward Return", "Bottom 5 Avg Forward Return", "Top-Bottom 5 Spread", "Prediction IC"]].tail(36).style.format(
+                {
+                    "Top 3 Avg Forward Return": "{:.2%}",
+                    "Top 5 Avg Forward Return": "{:.2%}",
+                    "Bottom 3 Avg Forward Return": "{:.2%}",
+                    "Bottom 5 Avg Forward Return": "{:.2%}",
+                    "Top-Bottom 5 Spread": "{:.2%}",
+                    "Prediction IC": "{:.3f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Gross vs Net Return")
+    if recommended in gross_returns:
+        gross = (1 + gross_returns[recommended]).cumprod()
+        net = (1 + returns[recommended]).cumprod()
+        gross_net = pd.DataFrame({"Gross Before Costs": gross, "Net After Costs": net})
+        st.plotly_chart(px.line(gross_net * STAGE_A2_INITIAL_CAPITAL, title="Gross vs Net Cumulative Performance"), use_container_width=True)
+    if not execution.empty:
+        method_execution = execution[execution["Portfolio"].eq(recommended)].copy()
+        st.metric("Average Monthly Turnover", f"{method_execution['Turnover'].mean():.2f}x")
+        st.metric("Total Cost Drag Estimate", f"{method_execution['Market Impact Cost'].sum():.2%}")
+        st.plotly_chart(px.line(method_execution, x="Date", y="Turnover", title="Monthly Turnover"), use_container_width=True)
+        st.dataframe(method_execution.sort_values("Turnover", ascending=False).head(10), use_container_width=True, hide_index=True)
+
+    st.subheader("Ranking Stability")
+    ranking_summary = diagnostics["ranking_summary"]
+    ranking_monthly = diagnostics["ranking_monthly"]
+    if not ranking_summary.empty:
+        st.dataframe(ranking_summary.style.format({"Average Rank Turnover": "{:.2%}", "Top-5 Basket Change Rate": "{:.2%}", "Average Holding Period Months": "{:.1f}"}), use_container_width=True, hide_index=True)
+    if not ranking_monthly.empty:
+        st.plotly_chart(px.line(ranking_monthly, x="Date", y="Rank Turnover", title="Top-5 Rank Turnover"), use_container_width=True)
+        st.dataframe(ranking_monthly.tail(24), use_container_width=True, hide_index=True)
+
+    st.subheader("Overfitting Check")
+    walk_log = result[2]
+    oos_ic = result[13]["Average Prediction IC"].iloc[0] if not result[13].empty else np.nan
+    train_ic = walk_log["Train IC"].mean() if not walk_log.empty and "Train IC" in walk_log else np.nan
+    overfit_rows = [{"Check": "Train IC vs OOS IC", "Train": train_ic, "OOS": oos_ic, "Warning": "Yes" if pd.notna(train_ic) and pd.notna(oos_ic) and train_ic - oos_ic > 0.15 else "No"}]
+    if not importance.empty:
+        stability = importance.groupby("Feature")["Importance"].agg(["mean", "std"])
+        unstable_share = ((stability["std"] / stability["mean"].replace(0, np.nan)) > 1.5).mean()
+        overfit_rows.append({"Check": "Feature Importance Instability", "Train": np.nan, "OOS": unstable_share, "Warning": "Yes" if unstable_share > 0.5 else "No"})
+    change_rate = diagnostics.get("model_change_rate", np.nan)
+    overfit_rows.append({"Check": "Monthly Best Model Change Rate", "Train": np.nan, "OOS": change_rate, "Warning": "Yes" if pd.notna(change_rate) and change_rate > 0.5 else "No"})
+    st.dataframe(pd.DataFrame(overfit_rows).style.format({"Train": "{:.3f}", "OOS": "{:.3f}"}), use_container_width=True, hide_index=True)
+    if any(row["Warning"] == "Yes" for row in overfit_rows):
+        st.warning("One or more overfitting diagnostics are elevated. Treat the ML edge as unstable until validated on more data.")
+
+    st.subheader("Target Comparison")
+    target_comparison = diagnostics["target_comparison"]
+    if not target_comparison.empty:
+        st.dataframe(
+            target_comparison.style.format(
+                {
+                    "OOS Sharpe": "{:.2f}",
+                    "OOS Return": "{:.2%}",
+                    "Max Drawdown": "{:.2%}",
+                    "Top-Minus-Bottom Spread": "{:.2%}",
+                    "Prediction IC": "{:.3f}",
+                    "Average Turnover": "{:.2f}x",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Feature Ablation")
+    feature_ablation = diagnostics["feature_ablation"]
+    if not feature_ablation.empty:
+        st.dataframe(
+            feature_ablation.style.format(
+                {
+                    "OOS Sharpe": "{:.2f}",
+                    "OOS Return": "{:.2%}",
+                    "Max Drawdown": "{:.2%}",
+                    "Top-Minus-Bottom Spread": "{:.2%}",
+                    "Prediction IC": "{:.3f}",
+                    "Average Turnover": "{:.2f}x",
+                    "Train IC": "{:.3f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    st.subheader("Portfolio Construction Diagnosis")
+    portfolio_comparison = bundle["portfolio_comparison"].copy()
+    if not portfolio_comparison.empty:
+        extra = portfolio_comparison[["Portfolio Method", "Total Return", "Sharpe", "Max Drawdown", "Average_Turnover", "Transaction Cost Drag", "Beta"]].copy()
+        ml_equal = diagnostics.get("ml_equal_top5_metrics", pd.DataFrame())
+        if not ml_equal.empty:
+            ml_equal_row = ml_equal.rename(
+                columns={
+                    "Strategy": "Portfolio Method",
+                    "Turnover": "Average_Turnover",
+                }
+            )[["Portfolio Method", "Total Return", "Sharpe", "Max Drawdown", "Average_Turnover", "Transaction Cost Drag", "Beta"]]
+            extra = pd.concat([ml_equal_row, extra], ignore_index=True)
+        extra["Diagnosis"] = np.where(
+            extra["Sharpe"] < 0,
+            "Weak signal or poor weighting",
+            np.where(extra["Average_Turnover"] > 1.0, "High turnover risk", np.where(extra["Beta"].abs() > 0.8, "High beta exposure", "Relatively stable")),
+        )
+        st.dataframe(
+            extra.style.format(
+                {
+                    "Total Return": "{:.2%}",
+                    "Sharpe": "{:.2f}",
+                    "Max Drawdown": "{:.2%}",
+                    "Average_Turnover": "{:.2f}x",
+                    "Transaction Cost Drag": "{:.2%}",
+                    "Beta": "{:.2f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
 def render_stage_a2_current_portfolio(bundle: dict) -> None:
@@ -1861,6 +2421,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     tabs = st.tabs(
         [
             "Executive Overview",
+            "Performance Diagnostics",
             "Portfolio Performance",
             "Current Portfolio",
             "Model Selection",
@@ -1874,20 +2435,22 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     with tabs[0]:
         render_stage_a2_executive_overview(bundle)
     with tabs[1]:
-        render_stage_a2_portfolio_performance(bundle)
+        render_stage_a2_performance_diagnostics(bundle)
     with tabs[2]:
-        render_stage_a2_current_portfolio(bundle)
+        render_stage_a2_portfolio_performance(bundle)
     with tabs[3]:
-        render_stage_a2_model_selection(bundle)
+        render_stage_a2_current_portfolio(bundle)
     with tabs[4]:
-        render_stage_a2_portfolio_comparison(bundle)
+        render_stage_a2_model_selection(bundle)
     with tabs[5]:
-        render_stage_a2_white_box_explanation(bundle)
+        render_stage_a2_portfolio_comparison(bundle)
     with tabs[6]:
-        render_stage_a2_risk_dashboard(bundle)
+        render_stage_a2_white_box_explanation(bundle)
     with tabs[7]:
-        render_stage_a2_stress_tests(bundle)
+        render_stage_a2_risk_dashboard(bundle)
     with tabs[8]:
+        render_stage_a2_stress_tests(bundle)
+    with tabs[9]:
         render_stage_a2_methodology(bundle)
 
     with st.expander("Advanced Research Details", expanded=False):
