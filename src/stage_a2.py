@@ -1977,14 +1977,14 @@ def render_stage_a2_executive_overview(bundle: dict) -> None:
     equity = (1 + strategy_returns).cumprod().to_frame(recommended)
     if benchmark is not None and not benchmark.empty:
         equity["SPY"] = (1 + benchmark.reindex(equity.index).fillna(0.0)).cumprod()
-    st.plotly_chart(px.line(equity * STAGE_A2_INITIAL_CAPITAL, title="Recommended Strategy vs SPY"), use_container_width=True)
+    st.plotly_chart(px.line(equity * STAGE_A2_INITIAL_CAPITAL, title="Recommended Strategy vs SPY"), use_container_width=True, key="a2_exec_equity")
     drawdown = equity / equity.cummax() - 1
-    st.plotly_chart(px.line(drawdown, title="Drawdown"), use_container_width=True)
+    st.plotly_chart(px.line(drawdown, title="Drawdown"), use_container_width=True, key="a2_exec_drawdown")
     st.subheader("Current Allocation Summary")
     if holdings.empty:
         st.warning("Current holdings are unavailable.")
     else:
-        st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Recommended Allocation"), use_container_width=True)
+        st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Recommended Allocation"), use_container_width=True, key="a2_exec_allocation")
         st.dataframe(holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}), use_container_width=True, hide_index=True)
     st.success(bundle["model_reason"])
     st.success(bundle["portfolio_reason"])
@@ -2002,7 +2002,7 @@ def render_stage_a2_portfolio_performance(bundle: dict) -> None:
     equity = (1 + strategy).cumprod().to_frame("Recommended Strategy")
     if benchmark is not None:
         equity["SPY"] = (1 + benchmark.reindex(strategy.index).fillna(0.0)).cumprod()
-    st.plotly_chart(px.line(equity * STAGE_A2_INITIAL_CAPITAL, title="Cumulative Return: Recommended Strategy vs SPY"), use_container_width=True)
+    st.plotly_chart(px.line(equity * STAGE_A2_INITIAL_CAPITAL, title="Cumulative Return: Recommended Strategy vs SPY"), use_container_width=True, key="a2_perf_equity")
     gross_net = pd.DataFrame()
     if recommended in gross_returns:
         gross_metrics = calculate_metrics(gross_returns[[recommended]], benchmark)
@@ -2014,9 +2014,9 @@ def render_stage_a2_portfolio_performance(bundle: dict) -> None:
         )
         gross_net["Transaction Cost Drag"] = gross_net["Total Return Gross"] - gross_net["Total Return Net"]
         st.dataframe(gross_net.style.format({c: "{:.2%}" for c in gross_net.columns if "Return" in c or "Drawdown" in c or "Drag" in c}).format({"Sharpe Net": "{:.2f}", "Sharpe Gross": "{:.2f}"}), use_container_width=True, hide_index=True)
-    st.plotly_chart(px.line(rolling_sharpe(strategy).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True)
+    st.plotly_chart(px.line(rolling_sharpe(strategy).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True, key="a2_perf_rolling_sharpe")
     drawdown = equity / equity.cummax() - 1
-    st.plotly_chart(px.line(drawdown, title="Rolling Drawdown"), use_container_width=True)
+    st.plotly_chart(px.line(drawdown, title="Rolling Drawdown"), use_container_width=True, key="a2_perf_rolling_drawdown")
     try:
         st.dataframe(monthly_return_table(strategy).style.format("{:.2%}"), use_container_width=True)
     except Exception:
@@ -2101,7 +2101,7 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
         c1.metric("Avg Top-Bottom 5 Spread", f"{signal['Top-Bottom 5 Spread'].mean():.2%}")
         c2.metric("Positive Spread Hit Rate", f"{(signal['Top-Bottom 5 Spread'] > 0).mean():.1%}")
         c3.metric("Avg Prediction IC", f"{signal['Prediction IC'].mean():.3f}")
-        st.plotly_chart(px.line(signal, x="Date", y=["Rolling Top-Bottom 5 Spread", "Rolling Prediction IC"], title="Rolling ML Signal Quality"), use_container_width=True)
+        st.plotly_chart(px.line(signal, x="Date", y=["Rolling Top-Bottom 5 Spread", "Rolling Prediction IC"], title="Rolling ML Signal Quality"), use_container_width=True, key="a2_diag_signal_quality")
         st.dataframe(
             signal[["Date", "Top 3 Avg Forward Return", "Top 5 Avg Forward Return", "Bottom 3 Avg Forward Return", "Bottom 5 Avg Forward Return", "Top-Bottom 5 Spread", "Prediction IC"]].tail(36).style.format(
                 {
@@ -2122,12 +2122,12 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
         gross = (1 + gross_returns[recommended]).cumprod()
         net = (1 + returns[recommended]).cumprod()
         gross_net = pd.DataFrame({"Gross Before Costs": gross, "Net After Costs": net})
-        st.plotly_chart(px.line(gross_net * STAGE_A2_INITIAL_CAPITAL, title="Gross vs Net Cumulative Performance"), use_container_width=True)
+        st.plotly_chart(px.line(gross_net * STAGE_A2_INITIAL_CAPITAL, title="Gross vs Net Cumulative Performance"), use_container_width=True, key="a2_diag_gross_net")
     if not execution.empty:
         method_execution = execution[execution["Portfolio"].eq(recommended)].copy()
         st.metric("Average Monthly Turnover", f"{method_execution['Turnover'].mean():.2f}x")
         st.metric("Total Cost Drag Estimate", f"{method_execution['Market Impact Cost'].sum():.2%}")
-        st.plotly_chart(px.line(method_execution, x="Date", y="Turnover", title="Monthly Turnover"), use_container_width=True)
+        st.plotly_chart(px.line(method_execution, x="Date", y="Turnover", title="Monthly Turnover"), use_container_width=True, key="a2_diag_turnover")
         st.dataframe(method_execution.sort_values("Turnover", ascending=False).head(10), use_container_width=True, hide_index=True)
 
     st.subheader("Ranking Stability")
@@ -2136,7 +2136,7 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
     if not ranking_summary.empty:
         st.dataframe(ranking_summary.style.format({"Average Rank Turnover": "{:.2%}", "Top-5 Basket Change Rate": "{:.2%}", "Average Holding Period Months": "{:.1f}"}), use_container_width=True, hide_index=True)
     if not ranking_monthly.empty:
-        st.plotly_chart(px.line(ranking_monthly, x="Date", y="Rank Turnover", title="Top-5 Rank Turnover"), use_container_width=True)
+        st.plotly_chart(px.line(ranking_monthly, x="Date", y="Rank Turnover", title="Top-5 Rank Turnover"), use_container_width=True, key="a2_diag_rank_turnover")
         st.dataframe(ranking_monthly.tail(24), use_container_width=True, hide_index=True)
 
     st.subheader("Overfitting Check")
@@ -2255,7 +2255,7 @@ def render_stage_a2_current_portfolio(bundle: dict) -> None:
         use_container_width=True,
         hide_index=True,
     )
-    st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Holdings"), use_container_width=True)
+    st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Holdings"), use_container_width=True, key="a2_current_holdings_bar")
     if holdings["Weight"].abs().max() > MAX_LONG_ONLY_WEIGHT + 1e-9:
         st.warning("One or more ETF weights exceed the 25% max ETF weight guideline.")
     if holdings["Weight"].abs().head(3).sum() > 0.75:
@@ -2271,7 +2271,7 @@ def render_stage_a2_model_selection(bundle: dict) -> None:
         return
     leaderboard["Selected"] = leaderboard["Model"].eq(bundle["selected_model"])
     st.success(bundle["model_reason"])
-    st.plotly_chart(px.bar(leaderboard, x="Model", y="OOS Sharpe", color="Selected", title="Model Leaderboard by Walk-Forward OOS Sharpe"), use_container_width=True)
+    st.plotly_chart(px.bar(leaderboard, x="Model", y="OOS Sharpe", color="Selected", title="Model Leaderboard by Walk-Forward OOS Sharpe"), use_container_width=True, key="a2_model_leaderboard")
     st.dataframe(
         leaderboard.style.format(
             {
@@ -2322,13 +2322,13 @@ def render_stage_a2_portfolio_comparison(bundle: dict) -> None:
         hide_index=True,
     )
     equity = (1 + result[4]).cumprod() * STAGE_A2_INITIAL_CAPITAL
-    st.plotly_chart(px.line(equity, title="Portfolio Method Cumulative Return Comparison"), use_container_width=True)
+    st.plotly_chart(px.line(equity, title="Portfolio Method Cumulative Return Comparison"), use_container_width=True, key="a2_portfolio_equity_compare")
     drawdown = (1 + result[4]).cumprod()
     drawdown = drawdown / drawdown.cummax() - 1
-    st.plotly_chart(px.line(drawdown, title="Portfolio Method Drawdown Comparison"), use_container_width=True)
+    st.plotly_chart(px.line(drawdown, title="Portfolio Method Drawdown Comparison"), use_container_width=True, key="a2_portfolio_drawdown_compare")
     if not result[6].empty:
         cost_turnover = result[6].groupby("Portfolio", as_index=False).agg(Turnover=("Turnover", "mean"), Cost_Drag=("Market Impact Cost", "sum"))
-        st.plotly_chart(px.bar(cost_turnover, x="Portfolio", y=["Turnover", "Cost_Drag"], barmode="group", title="Turnover and Cost Drag"), use_container_width=True)
+        st.plotly_chart(px.bar(cost_turnover, x="Portfolio", y=["Turnover", "Cost_Drag"], barmode="group", title="Turnover and Cost Drag"), use_container_width=True, key="a2_portfolio_cost_turnover")
 
 
 def render_stage_a2_white_box_explanation(bundle: dict) -> None:
@@ -2344,7 +2344,7 @@ def render_stage_a2_white_box_explanation(bundle: dict) -> None:
         importance_label = latest["Importance Type"].iloc[0] if "Importance Type" in latest else "Feature Importance Fallback, not full SHAP"
         if "SHAP" not in importance_label:
             st.warning("Feature Importance Fallback, not full SHAP.")
-        st.plotly_chart(px.bar(latest, x="Importance", y="Feature", orientation="h", title=f"Top 10 Feature Importance: {importance_label}"), use_container_width=True)
+        st.plotly_chart(px.bar(latest, x="Importance", y="Feature", orientation="h", title=f"Top 10 Feature Importance: {importance_label}"), use_container_width=True, key="a2_whitebox_importance")
         stability = importance.groupby("Feature")["Importance"].agg(["mean", "std"]).reset_index().sort_values("mean", ascending=False).head(15)
         st.dataframe(stability.style.format({"mean": "{:.3f}", "std": "{:.3f}"}), use_container_width=True, hide_index=True)
     if not holdings.empty:
@@ -2366,21 +2366,21 @@ def render_stage_a2_risk_dashboard(bundle: dict) -> None:
         method = regimes["Regime Method"].iloc[-1] if "Regime Method" in regimes else "Rule-Based Regime Proxy"
         label = "HMM Regime Detection" if method == "HMM" else "Rule-Based Regime Proxy"
         st.subheader(label)
-        st.plotly_chart(px.area(regimes.reset_index(), x=regimes.reset_index().columns[0], y="Regime Code", color="Regime", title=label), use_container_width=True)
+        st.plotly_chart(px.area(regimes.reset_index(), x=regimes.reset_index().columns[0], y="Regime Code", color="Regime", title=label), use_container_width=True, key="a2_risk_regime")
     st.subheader("Factor Exposure Monitoring")
     if exposures.empty:
         st.info("Factor exposure heatmap is unavailable.")
     else:
-        st.plotly_chart(px.imshow(exposures, aspect="auto", color_continuous_scale="RdBu", title="Factor Exposure Monitoring"), use_container_width=True)
+        st.plotly_chart(px.imshow(exposures, aspect="auto", color_continuous_scale="RdBu", title="Factor Exposure Monitoring"), use_container_width=True, key="a2_risk_factor_exposure")
     if close_benchmark is not None:
         aligned = pd.DataFrame({"Strategy": returns, "SPY": close_benchmark.reindex(returns.index)}).dropna()
         if len(aligned) > 60:
             st.metric("Beta to SPY", f"{aligned['Strategy'].cov(aligned['SPY']) / aligned['SPY'].var():.2f}")
             st.metric("Correlation to SPY", f"{aligned['Strategy'].corr(aligned['SPY']):.2f}")
-    st.plotly_chart(px.line((returns.rolling(63).std() * np.sqrt(252)).to_frame("Rolling Volatility"), title="Rolling Volatility"), use_container_width=True)
-    st.plotly_chart(px.line(rolling_sharpe(returns).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True)
+    st.plotly_chart(px.line((returns.rolling(63).std() * np.sqrt(252)).to_frame("Rolling Volatility"), title="Rolling Volatility"), use_container_width=True, key="a2_risk_rolling_vol")
+    st.plotly_chart(px.line(rolling_sharpe(returns).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True, key="a2_risk_rolling_sharpe")
     equity = (1 + returns).cumprod()
-    st.plotly_chart(px.line((equity / equity.cummax() - 1).to_frame("Rolling Drawdown"), title="Rolling Drawdown"), use_container_width=True)
+    st.plotly_chart(px.line((equity / equity.cummax() - 1).to_frame("Rolling Drawdown"), title="Rolling Drawdown"), use_container_width=True, key="a2_risk_rolling_drawdown")
     if not execution.empty and execution["Max Position Weight"].max() > MAX_LONG_ONLY_WEIGHT:
         st.warning("Concentration warning: at least one historical rebalance exceeded the max ETF weight guideline.")
     if not execution.empty:
@@ -2443,8 +2443,8 @@ def render_stage_a2_live_monitor(bundle: dict) -> None:
     live_curve = pd.DataFrame({"Stage A2": strategy_equity * STAGE_A2_INITIAL_CAPITAL})
     if not spy_equity.empty:
         live_curve["SPY"] = spy_equity * STAGE_A2_INITIAL_CAPITAL
-    st.plotly_chart(px.line(live_curve, title="$1,000,000 Live-Period Equity Curve"), use_container_width=True)
-    st.plotly_chart(px.line(live_drawdown.to_frame("Stage A2 Drawdown"), title="Live-Period Drawdown"), use_container_width=True)
+    st.plotly_chart(px.line(live_curve, title="$1,000,000 Live-Period Equity Curve"), use_container_width=True, key="a2_live_equity")
+    st.plotly_chart(px.line(live_drawdown.to_frame("Stage A2 Drawdown"), title="Live-Period Drawdown"), use_container_width=True, key="a2_live_drawdown")
 
     st.subheader("Current Recommended Holdings")
     if holdings.empty:
