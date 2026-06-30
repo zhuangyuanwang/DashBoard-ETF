@@ -41,7 +41,8 @@ Both labs use walk-forward logic: each prediction month trains only on data befo
 - A2 regime detection is a **rule-based / Gaussian-mixture regime proxy**, not a true Hidden Markov Model.
 - A2 HRP is labeled **HRP-style / risk-parity fallback** because it falls back to simpler risk-parity behavior when the clustering input is too sparse.
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.
-- A2 includes risk-managed defaults: volatility targeting, regime exposure scaling, and weight smoothing. These are designed to reduce drawdown and turnover, not to guarantee a higher Sharpe ratio in every sample.
+- A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest and Gradient Boosting remain available as heavier alternatives.
+- A2 includes risk controls: volatility targeting, optional regime exposure scaling, and weight smoothing. These are designed to reduce drawdown and turnover, not to guarantee a higher Sharpe ratio in every sample.
 - A1 and A2 performance shown in the dashboard is net of estimated costs; full gross-vs-net attribution is still a known extension.
 - Stress windows show "Not enough data" when the selected history does not overlap 2008, 2020, or 2022.
 

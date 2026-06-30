@@ -781,13 +781,13 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         st.metric("Initial Capital", f"${STAGE_A2_INITIAL_CAPITAL:,.0f}")
         years = st.slider("A2 research window", min_value=5, max_value=15, value=10, step=1)
         max_names = st.slider("A2 max stock names", min_value=20, max_value=min(120, len(default_symbols)), value=min(40, len(default_symbols)), step=10)
-        model_name = st.selectbox("White-box ML model", ["Random Forest", "Gradient Boosting", "Decision Tree", "Elastic Net"], index=0)
+        model_name = st.selectbox("White-box ML model", ["Random Forest", "Gradient Boosting", "Decision Tree", "Elastic Net"], index=2)
         base_cost_bps = st.slider("Txn cost bps", min_value=10, max_value=20, value=12, step=1)
         impact_bps = st.slider("Square-root impact bps", min_value=1, max_value=20, value=6, step=1)
         kelly_fraction = st.slider("Fractional Kelly", min_value=0.25, max_value=0.50, value=0.25, step=0.05)
         target_volatility = st.slider("Target volatility", min_value=0.06, max_value=0.20, value=0.12, step=0.01)
         smoothing = st.slider("Weight smoothing", min_value=0.00, max_value=0.80, value=0.25, step=0.05)
-        enable_regime_overlay = st.toggle("Regime risk overlay", value=True)
+        enable_regime_overlay = st.toggle("Regime risk overlay", value=False)
 
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=years)
@@ -836,7 +836,8 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         st.subheader("Stage A2 Walk-Forward Net Performance")
         st.caption(
             "Performance is net of fixed transaction costs and square-root market-impact estimates. "
-            "The default risk-managed settings target lower drawdown and volatility; disable the regime overlay or raise target volatility to compare a more aggressive profile."
+            "The default settings use a simpler Decision Tree, volatility targeting, and weight smoothing because this has been more stable in the current walk-forward sample. "
+            "Turn on the regime overlay when you want a more defensive profile, but expect it to reduce upside in some samples."
         )
         best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
         m1, m2, m3, m4 = st.columns(4)
