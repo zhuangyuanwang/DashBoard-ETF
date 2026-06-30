@@ -276,9 +276,9 @@ def create_stage_a2_model(model_name: str, params: dict | None = None, target_ty
     if model_name == "Random Forest":
         model_class = RandomForestClassifier if is_classification else RandomForestRegressor
         return model_class(
-            n_estimators=params.get("n_estimators", 120),
-            max_depth=params.get("max_depth", 5),
-            min_samples_leaf=params.get("min_samples_leaf", 12),
+            n_estimators=params.get("n_estimators", 60),
+            max_depth=params.get("max_depth", 4),
+            min_samples_leaf=params.get("min_samples_leaf", 15),
             max_features=params.get("max_features", "sqrt"),
             random_state=11,
             n_jobs=-1,
@@ -286,8 +286,8 @@ def create_stage_a2_model(model_name: str, params: dict | None = None, target_ty
     if model_name == "Gradient Boosting":
         model_class = GradientBoostingClassifier if is_classification else GradientBoostingRegressor
         return model_class(
-            n_estimators=params.get("n_estimators", 120),
-            max_depth=params.get("max_depth", 3),
+            n_estimators=params.get("n_estimators", 50),
+            max_depth=params.get("max_depth", 2),
             learning_rate=params.get("learning_rate", 0.035),
             subsample=params.get("subsample", 1.0),
             random_state=11,
@@ -392,6 +392,7 @@ def build_walk_forward_ml_predictions(
     min_train_samples: int = 300,
     min_history_months: int = 18,
     collect_importance: bool = True,
+    prediction_step: int = 1,
 ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
     # Walk-forward discipline:
     # - Each signal_date trains only on rows with feature dates strictly before signal_date.
@@ -405,7 +406,9 @@ def build_walk_forward_ml_predictions(
     importance_rows = []
 
     start_idx = min(min_history_months, max(1, len(dates) - 2))
-    for signal_date in dates[start_idx:-1]:
+    for step_idx, signal_date in enumerate(dates[start_idx:-1]):
+        if prediction_step > 1 and step_idx % prediction_step != 0:
+            continue
         train_mask = row_dates < signal_date
         predict_mask = row_dates == signal_date
         if train_mask.sum() < min_train_samples or predict_mask.sum() == 0:
@@ -1221,6 +1224,7 @@ def run_stage_a2_research(
     enable_tuning: bool,
     collect_importance: bool = True,
     top_n: int = 5,
+    prediction_step: int = 1,
 ):
     x, y, forward_returns = build_stage_a2_features(close, macro, target_type=target_type, return_forward_returns=True)
     diagnostics = {
@@ -1261,6 +1265,7 @@ def run_stage_a2_research(
                 min_train_samples=min_samples,
                 min_history_months=min_history,
                 collect_importance=collect_importance,
+                prediction_step=prediction_step,
             )
         except Exception:
             predictions, walk_log, importance_history = pd.Series(dtype=float, name="score"), pd.DataFrame(), pd.DataFrame()
@@ -1690,6 +1695,7 @@ def run_stage_a2_feature_subset_diagnostic(
         min_train_samples=80,
         min_history_months=9,
         collect_importance=False,
+        prediction_step=2,
     )
     signal_summary, _ = build_signal_diagnostics(predictions, forward)
     portfolio_returns, _, execution, _ = build_stage_a2_portfolios(
@@ -1744,6 +1750,7 @@ def run_stage_a2_target_diagnostic(close: pd.DataFrame, macro: pd.DataFrame, mod
             False,
             collect_importance=False,
             top_n=int(config["Top-N ETFs"]),
+            prediction_step=2,
         )
         metrics = result[8]
         signal_summary = result[13]
@@ -1794,13 +1801,8 @@ def build_stage_a2_performance_diagnostics(close: pd.DataFrame, macro: pd.DataFr
         {"Equal-Weight ML Top 5": ml_equal_execution["Turnover"].mean() if not ml_equal_execution.empty else np.nan},
         {"Equal-Weight ML Top 5": ((1 + ml_equal_gross.reindex(recommended_returns.index).fillna(0.0)).prod() - 1) - ((1 + ml_equal_net.reindex(recommended_returns.index).fillna(0.0)).prod() - 1)},
     )
-    target_comparison = run_stage_a2_target_diagnostic(close, macro, bundle["selected_model"], benchmark)
-    feature_ablation = pd.DataFrame(
-        [
-            run_stage_a2_feature_subset_diagnostic(close, macro, bundle["selected_model"], group, benchmark)
-            for group in ["momentum only", "trend only", "volatility/drawdown only", "macro only", "momentum + trend", "all features"]
-        ]
-    )
+    target_comparison = pd.DataFrame()
+    feature_ablation = pd.DataFrame()
     model_winners = []
     monthly_frames = []
     for model_name, model_result in bundle["model_results"].items():
@@ -1906,8 +1908,9 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame)
             config["Rebalance Threshold"],
             config["Target Type"],
             False,
-            collect_importance=True,
+            collect_importance=False,
             top_n=int(config["Top-N ETFs"]),
+            prediction_step=2,
         )
     benchmark = close["SPY"].pct_change(fill_method=None) if "SPY" in close else None
     selected_model, model_leaderboard, model_reason = select_best_stage_a2_model(model_results, benchmark)
@@ -1928,6 +1931,8 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame)
         "portfolio_reason": portfolio_reason,
         "current_holdings": holdings,
         "benchmark": benchmark,
+        "close": close,
+        "macro": macro,
     }
     bundle["performance_diagnostics"] = build_stage_a2_performance_diagnostics(close, macro, bundle)
     return bundle
@@ -2144,6 +2149,10 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
 
     st.subheader("Target Comparison")
     target_comparison = diagnostics["target_comparison"]
+    if target_comparison.empty:
+        st.info("Target comparison is a heavier diagnostic. It is not used for final model selection and is run only when requested.")
+        if st.button("Run Target Comparison Diagnostic"):
+            target_comparison = run_stage_a2_target_diagnostic(bundle["close"], bundle["macro"], bundle["selected_model"], benchmark)
     if not target_comparison.empty:
         st.dataframe(
             target_comparison.style.format(
@@ -2162,6 +2171,15 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
 
     st.subheader("Feature Ablation")
     feature_ablation = diagnostics["feature_ablation"]
+    if feature_ablation.empty:
+        st.info("Feature ablation retrains the selected model several times. Run it manually when you need the deeper research audit.")
+        if st.button("Run Feature Ablation Diagnostic"):
+            feature_ablation = pd.DataFrame(
+                [
+                    run_stage_a2_feature_subset_diagnostic(bundle["close"], bundle["macro"], bundle["selected_model"], group, benchmark)
+                    for group in ["momentum only", "trend only", "volatility/drawdown only", "macro only", "momentum + trend", "all features"]
+                ]
+            )
     if not feature_ablation.empty:
         st.dataframe(
             feature_ablation.style.format(
