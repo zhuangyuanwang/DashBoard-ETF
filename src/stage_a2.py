@@ -11,7 +11,7 @@ STAGE_A2_INITIAL_CAPITAL = 1_000_000
 SECTOR_ETFS = ["XLF", "XLE", "XLK", "XLI", "XLP", "XLU", "XLV"]
 GLOBAL_PROXIES = ["SPY", "EFA", "EWJ", "EEM", "IWM", "VGK", "TLT", "IEF", "GLD", "DBC", "HYG", "LQD"]
 A2_ETF_SYMBOLS = set(SECTOR_ETFS + GLOBAL_PROXIES)
-MAX_LONG_ONLY_WEIGHT = 0.25
+MAX_LONG_ONLY_WEIGHT = 0.05
 TARGET_TYPES = [
     "Next-month raw return",
     "Next-month excess return vs SPY",
@@ -19,14 +19,15 @@ TARGET_TYPES = [
     "Next-month cross-sectional rank percentile",
 ]
 STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
-STAGE_A2_PRESENTATION_MODELS = ["Elastic Net", "Decision Tree", "Random Forest", "Gradient Boosting"]
+STAGE_A2_PRESENTATION_MODELS = ["Elastic Net", "Decision Tree", "Random Forest"]
 STAGE_A2_PRESENTATION_CONFIG = {
     "Initial Capital": STAGE_A2_INITIAL_CAPITAL,
     "Rebalance Frequency": "Monthly",
     "Transaction Cost Bps": 10.0,
     "Square-Root Impact Bps": 6.0,
-    "Top-N ETFs": 5,
-    "Max ETF Weight": MAX_LONG_ONLY_WEIGHT,
+    "Candidate Stock Holdings": [30, 40, 50],
+    "Default Stock Holdings": 40,
+    "Max Stock Weight": MAX_LONG_ONLY_WEIGHT,
     "Benchmark": "SPY",
     "Research Window Years": 10,
     "Target Type": "Next-month raw return",
@@ -38,7 +39,7 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Monthly Turnover Cap": 0.75,
     "Rebalance Threshold": 0.03,
 }
-ETF_CATEGORY_MAP = {
+ASSET_CATEGORY_MAP = {
     **{symbol: "Sector ETF" for symbol in SECTOR_ETFS},
     "SPY": "US Equity Benchmark",
     "EFA": "Developed ex-US Equity",
@@ -761,6 +762,12 @@ def hrp_weights(returns: pd.DataFrame) -> pd.Series:
         return pd.Series(dtype=float)
     if returns.shape[1] == 1:
         return pd.Series(1.0, index=returns.columns)
+    if returns.shape[1] > 20:
+        inverse_vol = 1 / returns.std().replace(0, np.nan)
+        inverse_vol = inverse_vol.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        if inverse_vol.sum() <= 0:
+            return pd.Series(1 / returns.shape[1], index=returns.columns)
+        return inverse_vol / inverse_vol.sum()
     cov = returns.cov()
     corr = cov_to_corr(cov).clip(-1, 1)
     distance = np.sqrt((1 - corr) / 2)
@@ -946,6 +953,7 @@ def build_stage_a2_portfolios(
     turnover_cap: float,
     rebalance_threshold: float,
     top_n: int = 5,
+    eligible_symbols: tuple[str, ...] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if predictions.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -971,7 +979,8 @@ def build_stage_a2_portfolios(
         if isinstance(signal_rows, pd.Series):
             signal_rows = signal_rows.to_frame().T
         scores = signal_rows.set_index("symbol")["score"].dropna().sort_values(ascending=False)
-        tradable = [symbol for symbol in scores.index if symbol in daily_returns.columns]
+        eligible = set(eligible_symbols) if eligible_symbols is not None else set(daily_returns.columns)
+        tradable = [symbol for symbol in scores.index if symbol in daily_returns.columns and symbol in eligible]
         if len(tradable) < 8:
             continue
         scores = scores.loc[tradable]
@@ -1056,9 +1065,9 @@ def build_stage_a2_portfolios(
                     {
                         "Date": signal_date,
                         "Portfolio": strategy_name,
-                        "ETF": symbol,
+                        "Ticker": symbol,
                         "Weight": weight,
-                        "Category": ETF_CATEGORY_MAP.get(symbol, "ETF Proxy"),
+                        "Category": ASSET_CATEGORY_MAP.get(symbol, "Stock"),
                     }
                 )
             previous_weights[strategy_name] = weights
@@ -1225,6 +1234,7 @@ def run_stage_a2_research(
     collect_importance: bool = True,
     top_n: int = 5,
     prediction_step: int = 1,
+    eligible_symbols: tuple[str, ...] | None = None,
 ):
     x, y, forward_returns = build_stage_a2_features(close, macro, target_type=target_type, return_forward_returns=True)
     diagnostics = {
@@ -1299,6 +1309,7 @@ def run_stage_a2_research(
         turnover_cap,
         rebalance_threshold,
         top_n,
+        eligible_symbols,
     )
     if portfolio_returns.empty:
         return (
@@ -1437,6 +1448,73 @@ def recommend_stage_a2_portfolio_method(
     return recommended, comparison, reason
 
 
+def select_stage_a2_holding_count(
+    close: pd.DataFrame,
+    base_result: tuple,
+    benchmark: pd.Series | None,
+    eligible_symbols: tuple[str, ...],
+) -> tuple[int, dict[int, tuple], pd.DataFrame, str]:
+    config = STAGE_A2_PRESENTATION_CONFIG
+    rows = []
+    results = {}
+    for holding_count in config["Candidate Stock Holdings"]:
+        portfolio_returns, gross_returns, execution, weight_history = build_stage_a2_portfolios(
+            close,
+            base_result[1],
+            config["Transaction Cost Bps"],
+            config["Square-Root Impact Bps"],
+            config["Kelly Fraction"],
+            config["Target Volatility"],
+            config["Weight Smoothing"],
+            config["Regime Overlay"],
+            config["Max Drawdown Guard"],
+            config["Monthly Turnover Cap"],
+            config["Rebalance Threshold"],
+            top_n=int(holding_count),
+            eligible_symbols=eligible_symbols,
+        )
+        result = list(base_result)
+        result[4] = portfolio_returns
+        result[5] = gross_returns
+        result[6] = execution
+        result[7] = weight_history
+        result[8] = calculate_metrics(portfolio_returns, benchmark) if not portfolio_returns.empty else pd.DataFrame()
+        result[10] = stress_test_returns(portfolio_returns) if not portfolio_returns.empty else pd.DataFrame()
+        result[11] = factor_exposure_heatmap(portfolio_returns, close) if not portfolio_returns.empty else pd.DataFrame()
+        result = tuple(result)
+        results[int(holding_count)] = result
+        metrics = result[8]
+        execution = result[6]
+        if metrics.empty:
+            continue
+        best = metrics.sort_values(["Sharpe", "Max Drawdown"], ascending=[False, False]).iloc[0]
+        rows.append(
+            {
+                "Holding Count": int(holding_count),
+                "Best Portfolio Method": best["Series"],
+                "OOS Sharpe": best["Sharpe"],
+                "OOS Return": best["Total Return"],
+                "Max Drawdown": best["Max Drawdown"],
+                "Calmar": best["Calmar"],
+                "Average Turnover": execution["Turnover"].mean() if not execution.empty else np.nan,
+            }
+        )
+    leaderboard = pd.DataFrame(rows)
+    if leaderboard.empty:
+        fallback = int(config["Default Stock Holdings"])
+        return fallback, results, leaderboard, f"Defaulted to {fallback} holdings because holding-count diagnostics did not produce enough OOS data."
+    leaderboard = leaderboard.sort_values(
+        ["OOS Sharpe", "Max Drawdown", "Average Turnover"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+    selected_count = int(leaderboard.iloc[0]["Holding Count"])
+    reason = (
+        f"The system selected {selected_count} stocks because that holding count had the strongest walk-forward OOS Sharpe "
+        f"({leaderboard.iloc[0]['OOS Sharpe']:.2f}); max drawdown and turnover were tie-breakers."
+    )
+    return selected_count, results, leaderboard, reason
+
+
 def get_stage_a2_current_holdings(
     weight_history: pd.DataFrame,
     predictions: pd.Series,
@@ -1449,13 +1527,17 @@ def get_stage_a2_current_holdings(
     holdings = weight_history[(weight_history["Portfolio"].eq(recommended_method)) & (weight_history["Date"].eq(latest_date))].copy()
     if holdings.empty:
         return holdings
-    latest_signal_date = predictions.index.get_level_values("date").max() if not predictions.empty else None
+    latest_signal_date = None
+    if not predictions.empty:
+        prediction_dates = pd.Index(sorted(predictions.index.get_level_values("date").unique()))
+        eligible_dates = prediction_dates[prediction_dates <= latest_date]
+        latest_signal_date = eligible_dates.max() if len(eligible_dates) else prediction_dates.max()
     if latest_signal_date is not None:
         latest_scores = predictions.loc[predictions.index.get_level_values("date") == latest_signal_date]
         if not latest_scores.empty:
             score_frame = latest_scores.rename("Prediction Score").reset_index()
             score_frame["ML Rank"] = score_frame["Prediction Score"].rank(ascending=False, method="first").astype(int)
-            holdings = holdings.merge(score_frame[["symbol", "Prediction Score", "ML Rank"]], left_on="ETF", right_on="symbol", how="left").drop(columns=["symbol"], errors="ignore")
+            holdings = holdings.merge(score_frame[["symbol", "Prediction Score", "ML Rank"]], left_on="Ticker", right_on="symbol", how="left").drop(columns=["symbol"], errors="ignore")
     top_features = []
     if not importance_history.empty:
         top_features = importance_history.groupby("Feature")["Importance"].mean().sort_values(ascending=False).head(3).index.tolist()
@@ -1554,7 +1636,7 @@ def build_stage_a2_benchmark_comparison(close: pd.DataFrame, recommended_returns
         net, gross, execution = backtest_simple_rotation_benchmark(
             close,
             method,
-            top_n=int(STAGE_A2_PRESENTATION_CONFIG["Top-N ETFs"]),
+            top_n=int(STAGE_A2_PRESENTATION_CONFIG["Default Stock Holdings"]),
             base_cost_bps=float(STAGE_A2_PRESENTATION_CONFIG["Transaction Cost Bps"]),
         )
         returns_map[method] = net.reindex(recommended_returns.index).fillna(0.0)
@@ -1590,7 +1672,7 @@ def build_ranking_stability(predictions: pd.Series, top_n: int = 5) -> tuple[pd.
         rows.append(
             {
                 "Date": date,
-                "Top ETFs": ", ".join(top),
+                "Top Tickers": ", ".join(top),
                 "Top-5 Changed": np.nan if not previous_top else int(top_set != previous_top),
                 "Rank Turnover": np.nan if not previous_top else 1 - overlap / top_n,
                 "Top-5 Overlap": overlap,
@@ -1602,8 +1684,8 @@ def build_ranking_stability(predictions: pd.Series, top_n: int = 5) -> tuple[pd.
     summary = pd.DataFrame(
         [
             {
-                "Current Top-Ranked ETFs": monthly["Top ETFs"].iloc[-1] if not monthly.empty else "",
-                "Previous Month Top-Ranked ETFs": monthly["Top ETFs"].iloc[-2] if len(monthly) > 1 else "",
+                "Current Top-Ranked Stocks": monthly["Top Tickers"].iloc[-1] if not monthly.empty else "",
+                "Previous Month Top-Ranked Stocks": monthly["Top Tickers"].iloc[-2] if len(monthly) > 1 else "",
                 "Average Rank Turnover": monthly["Rank Turnover"].mean() if not monthly.empty else np.nan,
                 "Top-5 Basket Change Rate": monthly["Top-5 Changed"].mean() if not monthly.empty else np.nan,
                 "Average Holding Period Months": np.mean(completed) if completed else np.nan,
@@ -1710,7 +1792,7 @@ def run_stage_a2_feature_subset_diagnostic(
         config["Max Drawdown Guard"],
         config["Monthly Turnover Cap"],
         config["Rebalance Threshold"],
-        int(config["Top-N ETFs"]),
+        int(config["Default Stock Holdings"]),
     )
     if portfolio_returns.empty:
         return {"Feature Group": feature_group}
@@ -1749,7 +1831,7 @@ def run_stage_a2_target_diagnostic(close: pd.DataFrame, macro: pd.DataFrame, mod
             target,
             False,
             collect_importance=False,
-            top_n=int(config["Top-N ETFs"]),
+            top_n=int(config["Default Stock Holdings"]),
             prediction_step=2,
         )
         metrics = result[8]
@@ -1788,11 +1870,11 @@ def build_stage_a2_performance_diagnostics(close: pd.DataFrame, macro: pd.DataFr
             gross_total = (1 + result[5][recommended].reindex(recommended_returns.index).fillna(0.0)).prod() - 1
             net_total = (1 + recommended_returns).prod() - 1
             benchmark_table.loc[ml_mask, "Transaction Cost Drag"] = gross_total - net_total
-    ranking_summary, ranking_monthly = build_ranking_stability(result[1], int(STAGE_A2_PRESENTATION_CONFIG["Top-N ETFs"]))
+    ranking_summary, ranking_monthly = build_ranking_stability(result[1], int(bundle.get("selected_holding_count", STAGE_A2_PRESENTATION_CONFIG["Default Stock Holdings"])))
     ml_equal_net, ml_equal_gross, ml_equal_execution = backtest_ml_equal_weight_top_n(
         close,
         result[1],
-        int(STAGE_A2_PRESENTATION_CONFIG["Top-N ETFs"]),
+        int(bundle.get("selected_holding_count", STAGE_A2_PRESENTATION_CONFIG["Default Stock Holdings"])),
         float(STAGE_A2_PRESENTATION_CONFIG["Transaction Cost Bps"]),
     )
     ml_equal_metrics = format_diagnostic_metrics(
@@ -1896,8 +1978,9 @@ def compare_stress_to_spy(strategy_returns: pd.Series, benchmark: pd.Series | No
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame) -> dict:
+def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame, eligible_symbols: tuple[str, ...] | None = None) -> dict:
     config = STAGE_A2_PRESENTATION_CONFIG
+    eligible_symbols = eligible_symbols or tuple(symbol for symbol in close.columns if symbol != "SPY")
     model_results = {}
     for model_name in STAGE_A2_PRESENTATION_MODELS:
         model_results[model_name] = run_stage_a2_research(
@@ -1916,12 +1999,20 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame)
             config["Target Type"],
             False,
             collect_importance=False,
-            top_n=int(config["Top-N ETFs"]),
+            top_n=int(config["Default Stock Holdings"]),
             prediction_step=2,
+            eligible_symbols=eligible_symbols,
         )
     benchmark = close["SPY"].pct_change(fill_method=None) if "SPY" in close else None
     selected_model, model_leaderboard, model_reason = select_best_stage_a2_model(model_results, benchmark)
-    selected_result = model_results[selected_model] if selected_model else next(iter(model_results.values()))
+    base_selected_result = model_results[selected_model] if selected_model else next(iter(model_results.values()))
+    selected_holding_count, holding_count_results, holding_count_leaderboard, holding_count_reason = select_stage_a2_holding_count(
+        close,
+        base_selected_result,
+        benchmark,
+        eligible_symbols,
+    )
+    selected_result = holding_count_results.get(selected_holding_count) or (model_results[selected_model] if selected_model else next(iter(model_results.values())))
     recommended_method, portfolio_comparison, portfolio_reason = recommend_stage_a2_portfolio_method(
         selected_result[8], selected_result[5], selected_result[6], benchmark
     )
@@ -1931,6 +2022,10 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame)
         "model_results": model_results,
         "selected_model": selected_model,
         "selected_result": selected_result,
+        "selected_holding_count": selected_holding_count,
+        "holding_count_leaderboard": holding_count_leaderboard,
+        "holding_count_reason": holding_count_reason,
+        "eligible_symbols": eligible_symbols,
         "model_leaderboard": model_leaderboard,
         "model_reason": model_reason,
         "recommended_method": recommended_method,
@@ -1968,9 +2063,10 @@ def render_stage_a2_executive_overview(bundle: dict) -> None:
     cols[1].metric("Latest Rebalance Date", latest_rebalance)
     cols[2].metric("Selected Model", bundle["selected_model"])
     cols[3].metric("Recommended Method", recommended)
+    st.metric("Selected Holding Count", f"{bundle.get('selected_holding_count', 'N/A')} stocks")
 
     st.info(
-        "Stage A2 is a white-box ML multi-asset ETF rotation strategy. The system ranks ETFs using momentum, trend, "
+        "Stage A2 is a white-box ML long-only stock selection strategy. The system ranks stocks using momentum, trend, "
         "volatility, drawdown, beta, regime, and macro features, then builds a portfolio using the best-performing "
         "portfolio construction method based on walk-forward out-of-sample validation."
     )
@@ -1984,9 +2080,10 @@ def render_stage_a2_executive_overview(bundle: dict) -> None:
     if holdings.empty:
         st.warning("Current holdings are unavailable.")
     else:
-        st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Recommended Allocation"), use_container_width=True, key="a2_exec_allocation")
-        st.dataframe(holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}), use_container_width=True, hide_index=True)
+        st.plotly_chart(px.bar(holdings, x="Ticker", y="Weight", color="Category", title="Current Recommended Allocation"), use_container_width=True, key="a2_exec_allocation")
+        st.dataframe(holdings[["Ticker", "Weight", "Category", "ML Rank", "Prediction Score"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}), use_container_width=True, hide_index=True)
     st.success(bundle["model_reason"])
+    st.success(bundle.get("holding_count_reason", "Holding count diagnostic unavailable."))
     st.success(bundle["portfolio_reason"])
 
 
@@ -2211,6 +2308,22 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
         st.dataframe(feature_ablation, use_container_width=True, hide_index=True)
 
     st.subheader("Portfolio Construction Diagnosis")
+    holding_count_leaderboard = bundle.get("holding_count_leaderboard", pd.DataFrame())
+    if not holding_count_leaderboard.empty:
+        st.write("Holding count selection: the system compares 30/40/50 stocks using walk-forward OOS metrics.")
+        st.dataframe(
+            holding_count_leaderboard.style.format(
+                {
+                    "OOS Sharpe": "{:.2f}",
+                    "OOS Return": "{:.2%}",
+                    "Max Drawdown": "{:.2%}",
+                    "Calmar": "{:.2f}",
+                    "Average Turnover": "{:.2f}x",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
     portfolio_comparison = bundle["portfolio_comparison"].copy()
     if not portfolio_comparison.empty:
         extra = portfolio_comparison[["Portfolio Method", "Total Return", "Sharpe", "Max Drawdown", "Average_Turnover", "Transaction Cost Drag", "Beta"]].copy()
@@ -2251,13 +2364,13 @@ def render_stage_a2_current_portfolio(bundle: dict) -> None:
         st.warning("Current holdings are unavailable.")
         return
     st.dataframe(
-        holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}),
+        holdings[["Ticker", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}),
         use_container_width=True,
         hide_index=True,
     )
-    st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Holdings"), use_container_width=True, key="a2_current_holdings_bar")
+    st.plotly_chart(px.bar(holdings, x="Ticker", y="Weight", color="Category", title="Current Holdings"), use_container_width=True, key="a2_current_holdings_bar")
     if holdings["Weight"].abs().max() > MAX_LONG_ONLY_WEIGHT + 1e-9:
-        st.warning("One or more ETF weights exceed the 25% max ETF weight guideline.")
+        st.warning("One or more stock weights exceed the 5% max stock weight guideline.")
     if holdings["Weight"].abs().head(3).sum() > 0.75:
         st.warning("Portfolio is concentrated: top three absolute weights exceed 75%.")
     if diagnostics.get("Prediction Source") == "Fallback":
@@ -2335,7 +2448,7 @@ def render_stage_a2_white_box_explanation(bundle: dict) -> None:
     result = bundle["selected_result"]
     importance = result[3]
     holdings = bundle["current_holdings"]
-    st.info("This section explains which variables are driving the model's ETF ranking.")
+    st.info("This section explains which variables are driving the model's stock ranking.")
     if importance.empty:
         st.warning("Feature importance is unavailable for the selected model.")
     else:
@@ -2348,7 +2461,7 @@ def render_stage_a2_white_box_explanation(bundle: dict) -> None:
         stability = importance.groupby("Feature")["Importance"].agg(["mean", "std"]).reset_index().sort_values("mean", ascending=False).head(15)
         st.dataframe(stability.style.format({"mean": "{:.3f}", "std": "{:.3f}"}), use_container_width=True, hide_index=True)
     if not holdings.empty:
-        st.subheader("Current Top-Ranked ETFs")
+        st.subheader("Current Top-Ranked Stocks")
         st.dataframe(holdings.sort_values("ML Rank").head(10), use_container_width=True, hide_index=True)
 
 
@@ -2382,7 +2495,7 @@ def render_stage_a2_risk_dashboard(bundle: dict) -> None:
     equity = (1 + returns).cumprod()
     st.plotly_chart(px.line((equity / equity.cummax() - 1).to_frame("Rolling Drawdown"), title="Rolling Drawdown"), use_container_width=True, key="a2_risk_rolling_drawdown")
     if not execution.empty and execution["Max Position Weight"].max() > MAX_LONG_ONLY_WEIGHT:
-        st.warning("Concentration warning: at least one historical rebalance exceeded the max ETF weight guideline.")
+        st.warning("Concentration warning: at least one historical rebalance exceeded the max stock weight guideline.")
     if not execution.empty:
         st.metric("Total Transaction Cost Drag Estimate", f"{execution.loc[execution['Portfolio'].eq(recommended), 'Market Impact Cost'].sum():.2%}")
 
@@ -2451,7 +2564,7 @@ def render_stage_a2_live_monitor(bundle: dict) -> None:
         st.warning("Current holdings are unavailable.")
     else:
         st.dataframe(
-            holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format(
+            holdings[["Ticker", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format(
                 {"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}
             ),
             use_container_width=True,
@@ -2469,22 +2582,22 @@ def render_stage_a2_methodology(bundle: dict) -> None:
     st.markdown(
         """
 ### What Stage A2 Is
-Stage A2 is a white-box ML multi-asset ETF rotation strategy. It ranks ETFs monthly, validates predictions walk-forward, and converts the ranking into portfolio weights.
+Stage A2 is a white-box ML long-only stock selection strategy. It ranks stocks monthly, validates predictions walk-forward, selects a holding count, and converts the ranking into portfolio weights.
 
-### ML ETF Ranking
-The model scores each ETF using momentum, relative strength, volatility, drawdown, trend, beta, correlation, regime, and lagged macro features. The default target is next-month ETF return.
+### ML Stock Ranking
+The model scores each stock using momentum, relative strength, volatility, drawdown, trend, beta, correlation, regime, and lagged macro features. The default target is next-month stock return.
 
 ### Walk-Forward Validation
 Each prediction month trains only on data before that month. Forward returns use `shift(-1)` only to build training targets, not prediction-time features.
 
 ### Selection Rules
-The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
+The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The holding count is selected from 30/40/50 stocks using OOS metrics. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
 
 ### Portfolio Methods
 HRP-style / Risk-Parity Fallback clusters assets when possible and falls back to risk-parity behavior when data is sparse. Ledoit-Wolf Mean-Variance uses shrinkage covariance. Fractional Kelly sizes by score relative to variance. Beta-Neutral ML builds long/short exposure from top and bottom ranks.
 
 ### Current Limitations
-This is an ETF proxy universe, not full Russell 3000 / MSCI ACWI constituent coverage. FRED macro features may be included, but GDELT, Google Trends, and SEC EDGAR are not fully implemented in this Stage A2 dashboard. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. Black-Litterman and full TWAP/VWAP simulation are not implemented yet. ML may underperform simple strategies, and this dashboard reports that transparently.
+This uses the local stock universe file rather than full point-in-time Russell 3000 / MSCI ACWI constituent coverage. FRED macro features may be included, but GDELT, Google Trends, and SEC EDGAR are not fully implemented in this Stage A2 dashboard. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. Black-Litterman and full TWAP/VWAP simulation are not implemented yet. ML may underperform simple strategies, and this dashboard reports that transparently.
 """
     )
     config_rows = [{"Setting": key, "Value": value} for key, value in bundle["config"].items()]
@@ -2492,23 +2605,32 @@ This is an ETF proxy universe, not full Russell 3000 / MSCI ACWI constituent cov
 
 
 def render_stage_a2_dashboard(stock_universe_file) -> None:
-    st.title("Stage A2: White-Box ML Multi-Asset ETF Rotation Strategy")
+    st.title("Stage A2: White-Box ML Long-Only Stock Portfolio")
     st.caption("Presentation-focused dashboard: the system compares models and portfolio methods automatically using walk-forward OOS validation.")
 
     config = STAGE_A2_PRESENTATION_CONFIG
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=int(config["Research Window Years"]))
-    selected_symbols = tuple(dict.fromkeys([*SECTOR_ETFS, *GLOBAL_PROXIES]))
+    universe_table = pd.read_csv(stock_universe_file) if stock_universe_file.exists() else pd.DataFrame()
+    if "Ticker" in universe_table:
+        stock_symbols = tuple(universe_table["Ticker"].dropna().astype(str).str.upper().head(50).tolist())
+        sector_map = universe_table.set_index("Ticker")["Sector"].dropna().to_dict() if "Sector" in universe_table else {}
+        ASSET_CATEGORY_MAP.update({str(ticker).upper(): sector for ticker, sector in sector_map.items()})
+    else:
+        stock_symbols = tuple(DEFAULT_A2_STOCKS)
+    risk_proxy_symbols = tuple(symbol for symbol in GLOBAL_PROXIES + SECTOR_ETFS if symbol not in stock_symbols)
+    selected_symbols = tuple(dict.fromkeys([*stock_symbols, *risk_proxy_symbols]))
 
-    with st.spinner("Loading ETF prices and FRED macro data..."):
+    with st.spinner("Loading stock prices, risk proxies, and FRED macro data..."):
         close = load_stage_a2_prices(selected_symbols, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
         macro = load_fred_macro(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
-    if close.empty or close.shape[1] < 8:
-        st.error("Not enough ETF data loaded for Stage A2.")
+    eligible_symbols = tuple(symbol for symbol in stock_symbols if symbol in close.columns)
+    if close.empty or len(eligible_symbols) < 30:
+        st.error("Not enough stock data loaded for Stage A2 long-only stock selection.")
         return
 
-    with st.spinner("Running all Stage A2 models, selecting the best model, and comparing portfolio methods..."):
-        bundle = run_stage_a2_presentation_research(close, macro)
+    with st.spinner("Running ML stock ranking, selecting holding count, and comparing portfolio methods..."):
+        bundle = run_stage_a2_presentation_research(close, macro, eligible_symbols)
     if not bundle["recommended_method"]:
         st.error("Stage A2 did not produce enough walk-forward results.")
         return
