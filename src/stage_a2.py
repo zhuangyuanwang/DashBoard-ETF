@@ -19,6 +19,40 @@ TARGET_TYPES = [
     "Next-month cross-sectional rank percentile",
 ]
 STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
+STAGE_A2_PRESENTATION_MODELS = ["Elastic Net", "Decision Tree", "Random Forest", "Gradient Boosting"]
+STAGE_A2_PRESENTATION_CONFIG = {
+    "Initial Capital": STAGE_A2_INITIAL_CAPITAL,
+    "Rebalance Frequency": "Monthly",
+    "Transaction Cost Bps": 10.0,
+    "Square-Root Impact Bps": 6.0,
+    "Top-N ETFs": 5,
+    "Max ETF Weight": MAX_LONG_ONLY_WEIGHT,
+    "Benchmark": "SPY",
+    "Research Window Years": 10,
+    "Target Type": "Next-month raw return",
+    "Kelly Fraction": 0.25,
+    "Target Volatility": 0.12,
+    "Weight Smoothing": 0.0,
+    "Regime Overlay": True,
+    "Max Drawdown Guard": 0.15,
+    "Monthly Turnover Cap": 0.75,
+    "Rebalance Threshold": 0.03,
+}
+ETF_CATEGORY_MAP = {
+    **{symbol: "Sector ETF" for symbol in SECTOR_ETFS},
+    "SPY": "US Equity Benchmark",
+    "EFA": "Developed ex-US Equity",
+    "EWJ": "Japan Equity",
+    "EEM": "Emerging Markets Equity",
+    "IWM": "US Small Cap Equity",
+    "VGK": "Europe Equity",
+    "TLT": "Long Treasury",
+    "IEF": "Intermediate Treasury",
+    "GLD": "Gold",
+    "DBC": "Broad Commodities",
+    "HYG": "High Yield Credit",
+    "LQD": "Investment Grade Credit",
+}
 DEFAULT_A2_STOCKS = [
     "AAPL",
     "MSFT",
@@ -357,6 +391,7 @@ def build_walk_forward_ml_predictions(
     target_type: str = "Next-month raw return",
     min_train_samples: int = 300,
     min_history_months: int = 18,
+    collect_importance: bool = True,
 ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
     # Walk-forward discipline:
     # - Each signal_date trains only on rows with feature dates strictly before signal_date.
@@ -398,10 +433,11 @@ def build_walk_forward_ml_predictions(
                 "Train IC": train_ic,
             }
         )
-        importance = extract_feature_importance(model, x.columns, x.loc[predict_mask], target_type)
-        if not importance.empty:
-            importance["Signal Date"] = signal_date
-            importance_rows.append(importance)
+        if collect_importance and len(log_rows) % 3 == 0:
+            importance = extract_feature_importance(model, x.columns, x.loc[predict_mask], target_type)
+            if not importance.empty:
+                importance["Signal Date"] = signal_date
+                importance_rows.append(importance)
 
     if not predictions:
         return pd.Series(dtype=float, name="score"), pd.DataFrame(log_rows), pd.DataFrame()
@@ -906,9 +942,10 @@ def build_stage_a2_portfolios(
     max_drawdown_limit: float,
     turnover_cap: float,
     rebalance_threshold: float,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    top_n: int = 5,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if predictions.empty:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     daily_returns = close.pct_change(fill_method=None).dropna()
     prediction_frame = predictions.rename("score").reset_index().set_index("date")
     month_ends = close.resample("ME").last().index
@@ -919,6 +956,7 @@ def build_stage_a2_portfolios(
     equity_state = {name: 1.0 for name in strategy_names}
     peak_state = {name: 1.0 for name in strategy_names}
     execution_rows = []
+    weight_rows = []
 
     for idx in range(18, len(month_ends) - 1):
         signal_date = month_ends[idx]
@@ -934,14 +972,14 @@ def build_stage_a2_portfolios(
         if len(tradable) < 8:
             continue
         scores = scores.loc[tradable]
-        top_assets = scores.head(max(5, int(len(scores) * 0.30))).index.tolist()
+        top_assets = scores.head(max(1, top_n)).index.tolist()
         lookback = daily_returns.loc[:signal_date].tail(252)
 
         target_weights = {}
         hrp_weight, _ = cap_and_redistribute_long_weights(hrp_weights(lookback[top_assets]))
         target_weights["HRP-style / Risk-Parity Fallback"] = hrp_weight.reindex(close.columns).fillna(0.0)
-        target_weights["Ledoit-Wolf Mean-Variance"] = ledoit_wolf_weights(lookback, scores.head(max(5, int(len(scores) * 0.30)))).reindex(close.columns).fillna(0.0)
-        target_weights["Fractional Kelly"] = fractional_kelly_weights(lookback, scores.head(max(5, int(len(scores) * 0.30))), kelly_fraction).reindex(close.columns).fillna(0.0)
+        target_weights["Ledoit-Wolf Mean-Variance"] = ledoit_wolf_weights(lookback, scores.head(max(1, top_n))).reindex(close.columns).fillna(0.0)
+        target_weights["Fractional Kelly"] = fractional_kelly_weights(lookback, scores.head(max(1, top_n)), kelly_fraction).reindex(close.columns).fillna(0.0)
         target_weights["Beta-Neutral ML"] = beta_neutral_weights(lookback, scores).reindex(close.columns).fillna(0.0)
 
         period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_date)
@@ -1010,9 +1048,24 @@ def build_stage_a2_portfolios(
                     **overlay_info,
                 }
             )
+            for symbol, weight in weights[weights.abs() > 1e-8].sort_values(ascending=False).items():
+                weight_rows.append(
+                    {
+                        "Date": signal_date,
+                        "Portfolio": strategy_name,
+                        "ETF": symbol,
+                        "Weight": weight,
+                        "Category": ETF_CATEGORY_MAP.get(symbol, "ETF Proxy"),
+                    }
+                )
             previous_weights[strategy_name] = weights
 
-    return pd.DataFrame(returns_by_strategy).dropna(how="all"), pd.DataFrame(gross_returns_by_strategy).dropna(how="all"), pd.DataFrame(execution_rows)
+    return (
+        pd.DataFrame(returns_by_strategy).dropna(how="all"),
+        pd.DataFrame(gross_returns_by_strategy).dropna(how="all"),
+        pd.DataFrame(execution_rows),
+        pd.DataFrame(weight_rows),
+    )
 
 
 def detect_regime_states(close: pd.DataFrame, benchmark: str = "SPY") -> pd.DataFrame:
@@ -1166,6 +1219,8 @@ def run_stage_a2_research(
     rebalance_threshold: float,
     target_type: str,
     enable_tuning: bool,
+    collect_importance: bool = True,
+    top_n: int = 5,
 ):
     x, y, forward_returns = build_stage_a2_features(close, macro, target_type=target_type, return_forward_returns=True)
     diagnostics = {
@@ -1205,6 +1260,7 @@ def run_stage_a2_research(
                 target_type=target_type,
                 min_train_samples=min_samples,
                 min_history_months=min_history,
+                collect_importance=collect_importance,
             )
         except Exception:
             predictions, walk_log, importance_history = pd.Series(dtype=float, name="score"), pd.DataFrame(), pd.DataFrame()
@@ -1225,7 +1281,7 @@ def run_stage_a2_research(
     signal_summary, signal_monthly = build_signal_diagnostics(predictions, forward_returns)
     etf_signal_summary, etf_signal_monthly = build_signal_diagnostics(predictions, forward_returns, A2_ETF_SYMBOLS)
     classification_summary = build_classification_diagnostics(predictions, y, forward_returns) if target_type == "Next-month outperform SPY classification" else pd.DataFrame()
-    portfolio_returns, gross_returns, execution = build_stage_a2_portfolios(
+    portfolio_returns, gross_returns, execution, weight_history = build_stage_a2_portfolios(
         close,
         predictions,
         base_cost_bps,
@@ -1237,6 +1293,7 @@ def run_stage_a2_research(
         max_drawdown_limit,
         turnover_cap,
         rebalance_threshold,
+        top_n,
     )
     if portfolio_returns.empty:
         return (
@@ -1247,6 +1304,7 @@ def run_stage_a2_research(
             portfolio_returns,
             gross_returns,
             execution,
+            weight_history,
             pd.DataFrame(),
             pd.DataFrame(),
             pd.DataFrame(),
@@ -1274,6 +1332,7 @@ def run_stage_a2_research(
         portfolio_returns,
         gross_returns,
         execution,
+        weight_history,
         metrics,
         regimes,
         stress,
@@ -1288,422 +1347,554 @@ def run_stage_a2_research(
     )
 
 
-def render_stage_a2_dashboard(stock_universe_file) -> None:
-    st.title("Stage A2 Research Lab: ML-Powered Multi-Asset White-Box")
-    st.write(
-        "Intermediate capstone stage with white-box ML, walk-forward validation, HRP-style/Ledoit/Kelly portfolios, "
-        "rule-based regime proxy visualization, factor exposure monitoring, stress tests, and execution cost tracking."
+def select_best_stage_a2_model(model_results: dict[str, tuple], benchmark: pd.Series | None) -> tuple[str, pd.DataFrame, str]:
+    rows = []
+    for model_name, result in model_results.items():
+        metrics = result[8]
+        execution = result[6]
+        signal_summary = result[13]
+        walk_log = result[2]
+        if metrics.empty:
+            continue
+        best_metric = metrics.sort_values(["Sharpe", "Max Drawdown"], ascending=[False, False]).iloc[0]
+        turnover = execution["Turnover"].mean() if not execution.empty and "Turnover" in execution else np.nan
+        top_bottom = signal_summary["Average Top-Bottom 5 Spread"].iloc[0] if not signal_summary.empty and "Average Top-Bottom 5 Spread" in signal_summary else np.nan
+        prediction_ic = signal_summary["Average Prediction IC"].iloc[0] if not signal_summary.empty and "Average Prediction IC" in signal_summary else np.nan
+        train_ic = walk_log["Train IC"].mean() if not walk_log.empty and "Train IC" in walk_log else np.nan
+        rows.append(
+            {
+                "Model": model_name,
+                "Selected Portfolio During Model Test": best_metric["Series"],
+                "OOS Sharpe": best_metric["Sharpe"],
+                "OOS Annualized Return": best_metric["CAGR"],
+                "OOS Max Drawdown": best_metric["Max Drawdown"],
+                "Calmar": best_metric["Calmar"],
+                "Net Return After Costs": best_metric["Total Return"],
+                "Top-Minus-Bottom Spread": top_bottom,
+                "Prediction IC": prediction_ic,
+                "Average Turnover": turnover,
+                "Train Score": train_ic,
+                "OOS Score": prediction_ic,
+            }
+        )
+    leaderboard = pd.DataFrame(rows)
+    if leaderboard.empty:
+        return "", leaderboard, "No model produced enough walk-forward out-of-sample results."
+    leaderboard = leaderboard.sort_values(
+        ["OOS Sharpe", "OOS Max Drawdown", "Top-Minus-Bottom Spread", "Average Turnover"],
+        ascending=[False, False, False, True],
+    ).reset_index(drop=True)
+    selected = leaderboard.iloc[0]["Model"]
+    reason = (
+        f"{selected} was selected because it had the strongest walk-forward OOS Sharpe "
+        f"({leaderboard.iloc[0]['OOS Sharpe']:.2f}), with drawdown and turnover used as tie-breakers."
     )
+    if benchmark is not None and not benchmark.empty:
+        spy_metrics = calculate_metrics(benchmark.to_frame("SPY"))
+        if not spy_metrics.empty and leaderboard.iloc[0]["OOS Sharpe"] < spy_metrics.iloc[0]["Sharpe"]:
+            reason += " Warning: the selected ML model's best portfolio Sharpe is below SPY over the same available window."
+    return selected, leaderboard, reason
 
-    universe_table = pd.read_csv(stock_universe_file) if stock_universe_file.exists() else pd.DataFrame()
-    local_stocks = universe_table["Ticker"].dropna().astype(str).str.upper().head(80).tolist() if "Ticker" in universe_table else DEFAULT_A2_STOCKS
-    default_symbols = tuple(dict.fromkeys([*local_stocks, *SECTOR_ETFS, *GLOBAL_PROXIES]))
 
-    with st.sidebar:
-        st.header("Stage A2 Controls")
-        st.metric("Initial Capital", f"${STAGE_A2_INITIAL_CAPITAL:,.0f}")
-        years = st.slider("A2 research window", min_value=5, max_value=15, value=10, step=1)
-        max_names = st.slider("A2 max stock names", min_value=20, max_value=min(120, len(default_symbols)), value=min(40, len(default_symbols)), step=10)
-        model_name = st.selectbox("White-box ML model", STAGE_A2_MODEL_OPTIONS, index=4)
-        base_cost_bps = st.slider("Txn cost bps", min_value=10, max_value=20, value=12, step=1)
-        impact_bps = st.slider("Square-root impact bps", min_value=1, max_value=20, value=6, step=1)
-        kelly_fraction = st.slider("Fractional Kelly", min_value=0.25, max_value=0.50, value=0.25, step=0.05)
-        target_volatility = st.slider("Target volatility", min_value=0.06, max_value=0.20, value=0.12, step=0.01)
-        smoothing = st.slider("Weight smoothing", min_value=0.00, max_value=0.80, value=0.25, step=0.05)
-        enable_regime_overlay = st.toggle("Regime risk overlay", value=False)
-        max_drawdown_limit = st.slider("Max drawdown guard", min_value=0.05, max_value=0.25, value=0.15, step=0.01)
-        turnover_cap = st.slider("Monthly turnover cap", min_value=0.25, max_value=2.00, value=0.75, step=0.05)
-        rebalance_threshold = st.slider("Rebalance threshold", min_value=0.00, max_value=0.25, value=0.03, step=0.01)
-        target_type = st.selectbox("Prediction target", TARGET_TYPES, index=0)
-        enable_tuning = st.toggle("Walk-forward hyperparameter tuning", value=False)
+def recommend_stage_a2_portfolio_method(
+    metrics: pd.DataFrame,
+    gross_returns: pd.DataFrame,
+    execution: pd.DataFrame,
+    benchmark: pd.Series | None,
+) -> tuple[str, pd.DataFrame, str]:
+    if metrics.empty:
+        return "", pd.DataFrame(), "No portfolio method produced enough returns."
+    gross_metrics = calculate_metrics(gross_returns, benchmark) if not gross_returns.empty else pd.DataFrame()
+    comparison = metrics.rename(columns={"Series": "Portfolio Method"}).copy()
+    if not gross_metrics.empty:
+        gross = gross_metrics.rename(columns={"Series": "Portfolio Method"})[["Portfolio Method", "Total Return"]].rename(columns={"Total Return": "Gross Return"})
+        comparison = comparison.merge(gross, on="Portfolio Method", how="left")
+        comparison["Transaction Cost Drag"] = comparison["Gross Return"] - comparison["Total Return"]
+    else:
+        comparison["Gross Return"] = np.nan
+        comparison["Transaction Cost Drag"] = np.nan
+    if not execution.empty:
+        exec_summary = execution.groupby("Portfolio", as_index=False).agg(
+            Average_Turnover=("Turnover", "mean"),
+            Average_Cost=("Market Impact Cost", "mean"),
+            Max_Position_Weight=("Max Position Weight", "max"),
+        ).rename(columns={"Portfolio": "Portfolio Method"})
+        comparison = comparison.merge(exec_summary, on="Portfolio Method", how="left")
+    comparison = comparison.sort_values(
+        ["Sharpe", "Max Drawdown", "Average_Turnover", "Transaction Cost Drag"],
+        ascending=[False, False, True, True],
+    ).reset_index(drop=True)
+    recommended = comparison.iloc[0]["Portfolio Method"]
+    reason = (
+        f"{recommended} is recommended because it had the highest OOS Sharpe "
+        f"({comparison.iloc[0]['Sharpe']:.2f}); drawdown, turnover, and cost drag were used as tie-breakers."
+    )
+    return recommended, comparison, reason
 
-    end_date = pd.Timestamp.today().normalize()
-    start_date = end_date - pd.DateOffset(years=years)
-    selected_symbols = tuple(dict.fromkeys(list(default_symbols[:max_names]) + SECTOR_ETFS + GLOBAL_PROXIES))
 
-    with st.spinner("Loading A2 Yahoo Finance prices and FRED macro data..."):
-        close = load_stage_a2_prices(selected_symbols, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
-        macro = load_fred_macro(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
-    if close.empty or close.shape[1] < 12:
-        st.error("Not enough data loaded for Stage A2. Try a smaller universe or shorter window.")
-        return
+def get_stage_a2_current_holdings(
+    weight_history: pd.DataFrame,
+    predictions: pd.Series,
+    recommended_method: str,
+    importance_history: pd.DataFrame,
+) -> pd.DataFrame:
+    if weight_history.empty or not recommended_method:
+        return pd.DataFrame()
+    latest_date = weight_history.loc[weight_history["Portfolio"].eq(recommended_method), "Date"].max()
+    holdings = weight_history[(weight_history["Portfolio"].eq(recommended_method)) & (weight_history["Date"].eq(latest_date))].copy()
+    if holdings.empty:
+        return holdings
+    latest_signal_date = predictions.index.get_level_values("date").max() if not predictions.empty else None
+    if latest_signal_date is not None:
+        latest_scores = predictions.loc[predictions.index.get_level_values("date") == latest_signal_date]
+        if not latest_scores.empty:
+            score_frame = latest_scores.rename("Prediction Score").reset_index()
+            score_frame["ML Rank"] = score_frame["Prediction Score"].rank(ascending=False, method="first").astype(int)
+            holdings = holdings.merge(score_frame[["symbol", "Prediction Score", "ML Rank"]], left_on="ETF", right_on="symbol", how="left").drop(columns=["symbol"], errors="ignore")
+    top_features = []
+    if not importance_history.empty:
+        top_features = importance_history.groupby("Feature")["Importance"].mean().sort_values(ascending=False).head(3).index.tolist()
+    driver_text = "High ML rank; top model drivers: " + ", ".join(top_features) if top_features else "High ML rank based on current model score."
+    holdings["Reason / Top Drivers"] = driver_text
+    return holdings.sort_values("Weight", ascending=False)
 
-    with st.spinner("Training walk-forward ML models and building A2 portfolios..."):
-        (
-            x,
-            predictions,
-            walk_log,
-            importance_history,
-            portfolio_returns,
-            gross_returns,
-            execution,
-            metrics,
-            regimes,
-            stress,
-            exposures,
-            diagnostics,
-            signal_summary,
-            signal_monthly,
-            etf_signal_summary,
-            etf_signal_monthly,
-            tuning_results,
-            classification_summary,
-        ) = run_stage_a2_research(
+
+def rolling_sharpe(returns: pd.Series, window: int = 126) -> pd.Series:
+    return returns.rolling(window).mean() * 252 / (returns.rolling(window).std() * np.sqrt(252))
+
+
+def monthly_return_table(returns: pd.Series) -> pd.DataFrame:
+    monthly = (1 + returns).resample("ME").prod() - 1
+    table = monthly.to_frame("Return")
+    table["Year"] = table.index.year
+    table["Month"] = table.index.strftime("%b")
+    return table.pivot(index="Year", columns="Month", values="Return")
+
+
+def compare_stress_to_spy(strategy_returns: pd.Series, benchmark: pd.Series | None) -> pd.DataFrame:
+    windows = {
+        "2008 Crisis": ("2008-01-01", "2009-03-31"),
+        "2020 COVID Crash": ("2020-02-01", "2020-04-30"),
+        "2022 Inflation / Rate-Hike Bear Market": ("2022-01-01", "2022-12-31"),
+    }
+    rows = []
+    for label, (start, end) in windows.items():
+        strat = strategy_returns.loc[(strategy_returns.index >= start) & (strategy_returns.index <= end)].dropna()
+        spy = benchmark.loc[(benchmark.index >= start) & (benchmark.index <= end)].dropna() if benchmark is not None else pd.Series(dtype=float)
+        if strat.empty or spy.empty:
+            rows.append({"Stress Period": label, "Status": "Not enough data", "Comment": "Selected research window does not cover this stress period."})
+            continue
+        strat_equity = (1 + strat).cumprod()
+        spy_equity = (1 + spy).cumprod()
+        rows.append(
+            {
+                "Stress Period": label,
+                "Status": "Available",
+                "Strategy Return": strat_equity.iloc[-1] - 1,
+                "SPY Return": spy_equity.iloc[-1] - 1,
+                "Strategy Max Drawdown": (strat_equity / strat_equity.cummax() - 1).min(),
+                "SPY Max Drawdown": (spy_equity / spy_equity.cummax() - 1).min(),
+                "Strategy Volatility": strat.std() * np.sqrt(252),
+                "Comment": "Strategy outperformed SPY in this window." if strat_equity.iloc[-1] > spy_equity.iloc[-1] else "SPY outperformed strategy in this window.",
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame) -> dict:
+    config = STAGE_A2_PRESENTATION_CONFIG
+    model_results = {}
+    for model_name in STAGE_A2_PRESENTATION_MODELS:
+        model_results[model_name] = run_stage_a2_research(
             close,
             macro,
             model_name,
-            base_cost_bps,
-            impact_bps,
-            kelly_fraction,
-            target_volatility,
-            smoothing,
-            enable_regime_overlay,
-            max_drawdown_limit,
-            turnover_cap,
-            rebalance_threshold,
-            target_type,
-            enable_tuning,
+            config["Transaction Cost Bps"],
+            config["Square-Root Impact Bps"],
+            config["Kelly Fraction"],
+            config["Target Volatility"],
+            config["Weight Smoothing"],
+            config["Regime Overlay"],
+            config["Max Drawdown Guard"],
+            config["Monthly Turnover Cap"],
+            config["Rebalance Threshold"],
+            config["Target Type"],
+            False,
+            collect_importance=True,
+            top_n=int(config["Top-N ETFs"]),
         )
-        if portfolio_returns.empty:
-            st.error("Not enough walk-forward predictions to build Stage A2 portfolios.")
-            st.dataframe(pd.DataFrame([diagnostics]), use_container_width=True, hide_index=True)
-            return
-        benchmark = close["SPY"].pct_change(fill_method=None).reindex(portfolio_returns.index).fillna(0.0) if "SPY" in close else None
+    benchmark = close["SPY"].pct_change(fill_method=None) if "SPY" in close else None
+    selected_model, model_leaderboard, model_reason = select_best_stage_a2_model(model_results, benchmark)
+    selected_result = model_results[selected_model] if selected_model else next(iter(model_results.values()))
+    recommended_method, portfolio_comparison, portfolio_reason = recommend_stage_a2_portfolio_method(
+        selected_result[8], selected_result[5], selected_result[6], benchmark
+    )
+    holdings = get_stage_a2_current_holdings(selected_result[7], selected_result[1], recommended_method, selected_result[3])
+    return {
+        "config": config,
+        "model_results": model_results,
+        "selected_model": selected_model,
+        "selected_result": selected_result,
+        "model_leaderboard": model_leaderboard,
+        "model_reason": model_reason,
+        "recommended_method": recommended_method,
+        "portfolio_comparison": portfolio_comparison,
+        "portfolio_reason": portfolio_reason,
+        "current_holdings": holdings,
+        "benchmark": benchmark,
+    }
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Tradable Assets", close.shape[1])
-    c2.metric("ML Samples", f"{len(x):,}")
-    c3.metric("OOS Rebalances", f"{len(walk_log):,}")
-    c4.metric("Prediction Source", diagnostics.get("Prediction Source", "ML"))
-    if diagnostics.get("Fallback Used"):
-        st.warning("A2 used the white-box fallback signal because the selected ML model did not produce enough walk-forward predictions with the available data.")
-    elif diagnostics.get("Effective Model") != diagnostics.get("Requested Model"):
-        st.info(f"A2 used {diagnostics.get('Effective Model')} after the requested model produced insufficient predictions.")
 
-    performance_tab, diagnostics_tab, model_tab, regime_tab, risk_tab, execution_tab, paper_tab = st.tabs(
-        ["Performance", "ML Signal Diagnostics", "White-Box ML", "Regime States", "Risk & Stress", "Execution", "Working Paper #2"]
+def render_stage_a2_executive_overview(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    portfolio_returns = result[4]
+    metrics = result[8]
+    regimes = result[9]
+    recommended = bundle["recommended_method"]
+    benchmark = bundle["benchmark"]
+    holdings = bundle["current_holdings"]
+    selected_metrics = metrics[metrics["Series"].eq(recommended)].iloc[0]
+    strategy_returns = portfolio_returns[recommended]
+    current_regime = regimes["Regime"].iloc[-1] if not regimes.empty and "Regime" in regimes else "Not available"
+    latest_rebalance = holdings["Date"].max().date().isoformat() if not holdings.empty else "Not available"
+
+    cols = st.columns(4)
+    cols[0].metric("Current Portfolio Value", f"${selected_metrics['Ending Value']:,.0f}")
+    cols[1].metric("Net Return", f"{selected_metrics['Total Return']:.2%}")
+    cols[2].metric("OOS Sharpe", f"{selected_metrics['Sharpe']:.2f}")
+    cols[3].metric("Max Drawdown", f"{selected_metrics['Max Drawdown']:.2%}")
+    cols = st.columns(4)
+    cols[0].metric("Current Regime", current_regime)
+    cols[1].metric("Latest Rebalance Date", latest_rebalance)
+    cols[2].metric("Selected Model", bundle["selected_model"])
+    cols[3].metric("Recommended Method", recommended)
+
+    st.info(
+        "Stage A2 is a white-box ML multi-asset ETF rotation strategy. The system ranks ETFs using momentum, trend, "
+        "volatility, drawdown, beta, regime, and macro features, then builds a portfolio using the best-performing "
+        "portfolio construction method based on walk-forward out-of-sample validation."
+    )
+    equity = (1 + strategy_returns).cumprod().to_frame(recommended)
+    if benchmark is not None and not benchmark.empty:
+        equity["SPY"] = (1 + benchmark.reindex(equity.index).fillna(0.0)).cumprod()
+    st.plotly_chart(px.line(equity * STAGE_A2_INITIAL_CAPITAL, title="Recommended Strategy vs SPY"), use_container_width=True)
+    drawdown = equity / equity.cummax() - 1
+    st.plotly_chart(px.line(drawdown, title="Drawdown"), use_container_width=True)
+    st.subheader("Current Allocation Summary")
+    if holdings.empty:
+        st.warning("Current holdings are unavailable.")
+    else:
+        st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Recommended Allocation"), use_container_width=True)
+        st.dataframe(holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}), use_container_width=True, hide_index=True)
+    st.success(bundle["model_reason"])
+    st.success(bundle["portfolio_reason"])
+
+
+def render_stage_a2_portfolio_performance(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    returns = result[4]
+    gross_returns = result[5]
+    execution = result[6]
+    metrics = result[8]
+    benchmark = bundle["benchmark"]
+    strategy = returns[recommended]
+    equity = (1 + strategy).cumprod().to_frame("Recommended Strategy")
+    if benchmark is not None:
+        equity["SPY"] = (1 + benchmark.reindex(strategy.index).fillna(0.0)).cumprod()
+    st.plotly_chart(px.line(equity * STAGE_A2_INITIAL_CAPITAL, title="Cumulative Return: Recommended Strategy vs SPY"), use_container_width=True)
+    gross_net = pd.DataFrame()
+    if recommended in gross_returns:
+        gross_metrics = calculate_metrics(gross_returns[[recommended]], benchmark)
+        net_metrics = metrics[metrics["Series"].eq(recommended)]
+        gross_net = net_metrics[["Series", "Total Return", "Sharpe", "Max Drawdown"]].merge(
+            gross_metrics[["Series", "Total Return", "Sharpe", "Max Drawdown"]],
+            on="Series",
+            suffixes=(" Net", " Gross"),
+        )
+        gross_net["Transaction Cost Drag"] = gross_net["Total Return Gross"] - gross_net["Total Return Net"]
+        st.dataframe(gross_net.style.format({c: "{:.2%}" for c in gross_net.columns if "Return" in c or "Drawdown" in c or "Drag" in c}).format({"Sharpe Net": "{:.2f}", "Sharpe Gross": "{:.2f}"}), use_container_width=True, hide_index=True)
+    st.plotly_chart(px.line(rolling_sharpe(strategy).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True)
+    drawdown = equity / equity.cummax() - 1
+    st.plotly_chart(px.line(drawdown, title="Rolling Drawdown"), use_container_width=True)
+    try:
+        st.dataframe(monthly_return_table(strategy).style.format("{:.2%}"), use_container_width=True)
+    except Exception:
+        st.info("Monthly return table is unavailable for this sample.")
+    perf = metrics[metrics["Series"].eq(recommended)].rename(
+        columns={
+            "CAGR": "Annualized Return",
+            "Annual Volatility": "Annualized Volatility",
+            "Ending Value": "Final Portfolio Value",
+        }
+    )
+    avg_turnover = execution.loc[execution["Portfolio"].eq(recommended), "Turnover"].mean() if not execution.empty else np.nan
+    cost_drag = gross_net["Transaction Cost Drag"].iloc[0] if not gross_net.empty else np.nan
+    perf["Turnover"] = avg_turnover
+    perf["Transaction Cost Drag"] = cost_drag
+    st.dataframe(
+        perf[["Annualized Return", "Annualized Volatility", "Sharpe", "Sortino", "Calmar", "Max Drawdown", "Beta", "Turnover", "Transaction Cost Drag", "Final Portfolio Value"]].style.format(
+            {
+                "Annualized Return": "{:.2%}",
+                "Annualized Volatility": "{:.2%}",
+                "Sharpe": "{:.2f}",
+                "Sortino": "{:.2f}",
+                "Calmar": "{:.2f}",
+                "Max Drawdown": "{:.2%}",
+                "Beta": "{:.2f}",
+                "Turnover": "{:.2f}x",
+                "Transaction Cost Drag": "{:.2%}",
+                "Final Portfolio Value": "${:,.0f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
     )
 
-    with performance_tab:
-        st.subheader("Stage A2 Walk-Forward Net Performance")
-        st.caption(
-            "Performance is net of fixed transaction costs and square-root market-impact estimates. "
-            "The default settings use a simpler Decision Tree, volatility targeting, and weight smoothing because this has been more stable in the current walk-forward sample. "
-            "The max drawdown guard is applied on daily backtest bars and de-risks a portfolio after the threshold is reached."
-        )
-        best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Best Portfolio", best["Series"])
-        m2.metric("Ending Value", f"${best['Ending Value']:,.0f}")
-        m3.metric("Total PnL", f"${best['Total PnL']:,.0f}")
-        m4.metric("Sharpe", f"{best['Sharpe']:.2f}")
-        st.dataframe(
-            metrics.style.format(
-                {
-                    "Ending Value": "${:,.0f}",
-                    "Total PnL": "${:,.0f}",
-                    "Total Return": "{:.2%}",
-                    "CAGR": "{:.2%}",
-                    "Annual Volatility": "{:.2%}",
-                    "Sharpe": "{:.2f}",
-                    "Sortino": "{:.2f}",
-                    "Max Drawdown": "{:.2%}",
-                    "Calmar": "{:.2f}",
-                    "Alpha": "{:.2%}",
-                    "Beta": "{:.2f}",
-                    "Hit Rate": "{:.1%}",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-        equity = (1 + portfolio_returns).cumprod()
-        dollar_equity = equity * STAGE_A2_INITIAL_CAPITAL
-        if benchmark is not None:
-            dollar_equity["SPY Benchmark"] = (1 + benchmark).cumprod() * STAGE_A2_INITIAL_CAPITAL
-        st.plotly_chart(px.line(dollar_equity, x=dollar_equity.index, y=dollar_equity.columns, title="$1,000,000 A2 Equity Curve"), use_container_width=True)
-        drawdown = equity / equity.cummax() - 1
-        st.plotly_chart(px.line(drawdown, x=drawdown.index, y=drawdown.columns, title="Rolling Drawdown"), use_container_width=True)
 
-    with diagnostics_tab:
-        st.subheader("Stage A2 ML Signal Diagnostics")
-        gross_metrics = calculate_metrics(gross_returns, benchmark) if not gross_returns.empty else pd.DataFrame()
-        if not gross_metrics.empty:
-            gross_net = metrics[["Series", "Total Return", "Sharpe", "Max Drawdown"]].merge(
-                gross_metrics[["Series", "Total Return", "Sharpe", "Max Drawdown"]],
-                on="Series",
-                suffixes=(" Net", " Gross"),
-            )
-            gross_net["Transaction Cost / Guard Drag"] = gross_net["Total Return Gross"] - gross_net["Total Return Net"]
-            st.dataframe(
-                gross_net.style.format(
-                    {
-                        "Total Return Net": "{:.2%}",
-                        "Sharpe Net": "{:.2f}",
-                        "Max Drawdown Net": "{:.2%}",
-                        "Total Return Gross": "{:.2%}",
-                        "Sharpe Gross": "{:.2f}",
-                        "Max Drawdown Gross": "{:.2%}",
-                        "Transaction Cost / Guard Drag": "{:.2%}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        if not signal_summary.empty:
-            st.subheader("Prediction Spread Quality: Ranked Assets")
-            st.dataframe(
-                signal_summary.style.format(
-                    {
-                        "Average Top 3 Return": "{:.2%}",
-                        "Average Top 5 Return": "{:.2%}",
-                        "Average Bottom 3 Return": "{:.2%}",
-                        "Average Bottom 5 Return": "{:.2%}",
-                        "Average Top-Bottom 5 Spread": "{:.2%}",
-                        "Average Prediction IC": "{:.3f}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        if not etf_signal_summary.empty:
-            st.subheader("Prediction Spread Quality: ETF / Global Proxy Subset")
-            st.dataframe(
-                etf_signal_summary.style.format(
-                    {
-                        "Average Top 3 Return": "{:.2%}",
-                        "Average Top 5 Return": "{:.2%}",
-                        "Average Bottom 3 Return": "{:.2%}",
-                        "Average Bottom 5 Return": "{:.2%}",
-                        "Average Top-Bottom 5 Spread": "{:.2%}",
-                        "Average Prediction IC": "{:.3f}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        if not classification_summary.empty:
-            st.subheader("Classification Target Diagnostics")
-            st.dataframe(
-                classification_summary.style.format(
-                    {
-                        "Classification Accuracy": "{:.2%}",
-                        "Precision": "{:.2%}",
-                        "Avg Forward Return of Predicted Outperformers": "{:.2%}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        if not signal_monthly.empty:
-            st.plotly_chart(px.line(signal_monthly, x="Date", y=["Top-Bottom 5 Spread", "Prediction IC"], title="Monthly Prediction Spread and IC"), use_container_width=True)
-            st.dataframe(signal_monthly.tail(24).style.format({column: "{:.2%}" for column in signal_monthly.columns if "Return" in column or "Spread" in column}), use_container_width=True, hide_index=True)
-        if not etf_signal_monthly.empty:
-            st.plotly_chart(
-                px.line(etf_signal_monthly, x="Date", y=["Top-Bottom 5 Spread", "Prediction IC"], title="ETF / Global Proxy Monthly Spread and IC"),
-                use_container_width=True,
-            )
-        st.subheader("Monthly Turnover and Cost Drag")
-        if execution.empty:
-            st.info("No execution rows are available for turnover diagnostics.")
-        else:
-            monthly_execution = execution.groupby(["Date", "Portfolio"], as_index=False).agg(
-                Turnover=("Turnover", "mean"),
-                Requested_Turnover=("Requested Turnover", "mean"),
-                Estimated_Cost=("Market Impact Cost", "sum"),
-                Rebalance_Skipped=("Rebalance Skipped", lambda values: int((values == "Yes").sum())),
-            )
-            st.dataframe(
-                monthly_execution.tail(48).style.format(
-                    {
-                        "Turnover": "{:.2f}x",
-                        "Requested_Turnover": "{:.2f}x",
-                        "Estimated_Cost": "{:.2%}",
-                        "Rebalance_Skipped": "{:.0f}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        st.subheader("Prediction Source and Fallback")
-        st.write(f"Prediction source: **{diagnostics.get('Prediction Source', 'ML')}**")
-        if not walk_log.empty and "Model Engine" in walk_log:
-            engine_summary = walk_log["Model Engine"].value_counts().rename_axis("Model Engine").reset_index(name="Months")
-            st.dataframe(engine_summary, use_container_width=True, hide_index=True)
-        fallback_count = int((walk_log["Prediction Source"] == "Fallback").sum()) if not walk_log.empty and "Prediction Source" in walk_log else 0
-        st.metric("Fallback Months", fallback_count)
-        if not walk_log.empty and "Train IC" in walk_log and not signal_summary.empty:
-            train_ic = walk_log["Train IC"].mean()
-            oos_ic = signal_summary["Average Prediction IC"].iloc[0]
-            if pd.notna(train_ic) and pd.notna(oos_ic) and train_ic - oos_ic > 0.15:
-                st.warning(f"Overfitting warning: average train IC ({train_ic:.3f}) is much higher than OOS IC ({oos_ic:.3f}).")
-        st.subheader("Selected Hyperparameters")
-        st.write(diagnostics.get("Selected Hyperparameters", "{}"))
-        if not tuning_results.empty:
-            st.dataframe(
-                tuning_results.head(20).style.format(
-                    {
-                        "Prediction IC": "{:.3f}",
-                        "Top-Bottom Spread": "{:.2%}",
-                        "Top Basket Sharpe": "{:.2f}",
-                        "Top Basket Net Return Estimate": "{:.2%}",
-                        "Selection Score": "{:.4f}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        if not importance_history.empty:
-            stability = importance_history.groupby("Feature")["Importance"].agg(["mean", "std"]).reset_index()
-            stability["Stability Ratio"] = stability["mean"] / stability["std"].replace(0, np.nan)
-            st.subheader("Feature Importance Stability")
-            st.dataframe(stability.sort_values("mean", ascending=False).head(20).style.format({"mean": "{:.3f}", "std": "{:.3f}", "Stability Ratio": "{:.2f}"}), use_container_width=True, hide_index=True)
+def render_stage_a2_current_portfolio(bundle: dict) -> None:
+    holdings = bundle["current_holdings"]
+    diagnostics = bundle["selected_result"][12]
+    if holdings.empty:
+        st.warning("Current holdings are unavailable.")
+        return
+    st.dataframe(
+        holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format({"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.plotly_chart(px.bar(holdings, x="ETF", y="Weight", color="Category", title="Current Holdings"), use_container_width=True)
+    if holdings["Weight"].abs().max() > MAX_LONG_ONLY_WEIGHT + 1e-9:
+        st.warning("One or more ETF weights exceed the 25% max ETF weight guideline.")
+    if holdings["Weight"].abs().head(3).sum() > 0.75:
+        st.warning("Portfolio is concentrated: top three absolute weights exceed 75%.")
+    if diagnostics.get("Prediction Source") == "Fallback":
+        st.warning("Prediction source is fallback instead of ML.")
 
-    with model_tab:
-        st.subheader("SHAP / Feature Importance Tracking")
-        if importance_history.empty:
-            st.info("Feature importance is unavailable for the selected model.")
-        else:
-            if "Importance Type" in importance_history:
-                st.caption("When `shap` is installed and compatible with the selected estimator, importance uses mean absolute SHAP values. Otherwise it falls back to native model importance or absolute linear coefficients.")
-                st.dataframe(importance_history["Importance Type"].value_counts().rename_axis("Importance Type").reset_index(name="Rows"), use_container_width=True, hide_index=True)
-            latest_importance = importance_history.sort_values("Signal Date").groupby("Feature")["Importance"].tail(1)
-            latest_importance = importance_history.loc[latest_importance.index].sort_values("Importance", ascending=False).head(15)
-            st.plotly_chart(px.bar(latest_importance, x="Importance", y="Feature", orientation="h", title=f"{model_name} Latest Feature Importance"), use_container_width=True)
-            history = importance_history.groupby(["Signal Date", "Feature"], as_index=False)["Importance"].mean()
-            top_features = latest_importance["Feature"].head(8).tolist()
-            st.plotly_chart(px.line(history[history["Feature"].isin(top_features)], x="Signal Date", y="Importance", color="Feature", title="Feature Importance Through Time"), use_container_width=True)
-        st.subheader("Walk-Forward Training Log")
-        debug_columns = [
-            "Train Start",
-            "Train End",
-            "Prediction Month",
-            "Signal Date",
-            "Train Samples",
-            "Predicted Assets",
-            "Model",
-            "Prediction Source",
-            "Model Engine",
-        ]
-        st.dataframe(walk_log[[column for column in debug_columns if column in walk_log.columns]].tail(36), use_container_width=True, hide_index=True)
-        fallback_months = walk_log[walk_log.get("Prediction Source", pd.Series(dtype=str)).eq("Fallback")] if not walk_log.empty and "Prediction Source" in walk_log else pd.DataFrame()
-        st.subheader("Fallback Months")
-        if fallback_months.empty:
-            st.success("No fallback months. The selected ML path produced the walk-forward predictions.")
-        else:
-            st.dataframe(fallback_months, use_container_width=True, hide_index=True)
 
-    with regime_tab:
-        if regimes.empty:
-            st.warning("Not enough data for regime state detection.")
-        else:
-            regime_method = regimes["Regime Method"].iloc[-1] if "Regime Method" in regimes else "Unknown"
-            st.subheader("HMM / Regime State Visualization")
-            if regime_method == "HMM":
-                st.write("Regime states use a 3-state Gaussian Hidden Markov Model on monthly SPY return, volatility, and drawdown, then label states as Bear, Recovery, or Bull by average return.")
-            else:
-                st.write("A true HMM engine is not available in this runtime, so Stage A2 is using the clearly labeled Gaussian-mixture regime proxy.")
-            st.metric("Regime Engine", regime_method)
-            regime_chart = regimes.reset_index()
-            regime_chart = regime_chart.rename(columns={regime_chart.columns[0]: "Date"})
-            regime_chart["vol_6m"] = regime_chart["vol_6m"].abs().fillna(0.0).clip(lower=0.001)
-            st.plotly_chart(
-                px.scatter(
-                    regime_chart,
-                    x="Date",
-                    y="return_1m",
-                    color="Regime",
-                    size="vol_6m",
-                    title="Rule-Based Bull / Bear / Recovery Regime Proxy",
-                ),
-                use_container_width=True,
-            )
-            st.plotly_chart(
-                px.area(regime_chart, x="Date", y="Regime Code", color="Regime", title="Rule-Based Regime Proxy Timeline"),
-                use_container_width=True,
-            )
+def render_stage_a2_model_selection(bundle: dict) -> None:
+    leaderboard = bundle["model_leaderboard"].copy()
+    if leaderboard.empty:
+        st.warning("No model leaderboard is available.")
+        return
+    leaderboard["Selected"] = leaderboard["Model"].eq(bundle["selected_model"])
+    st.success(bundle["model_reason"])
+    st.plotly_chart(px.bar(leaderboard, x="Model", y="OOS Sharpe", color="Selected", title="Model Leaderboard by Walk-Forward OOS Sharpe"), use_container_width=True)
+    st.dataframe(
+        leaderboard.style.format(
+            {
+                "OOS Sharpe": "{:.2f}",
+                "OOS Annualized Return": "{:.2%}",
+                "OOS Max Drawdown": "{:.2%}",
+                "Calmar": "{:.2f}",
+                "Net Return After Costs": "{:.2%}",
+                "Top-Minus-Bottom Spread": "{:.2%}",
+                "Prediction IC": "{:.3f}",
+                "Average Turnover": "{:.2f}x",
+                "Train Score": "{:.3f}",
+                "OOS Score": "{:.3f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    if (leaderboard["Top-Minus-Bottom Spread"].fillna(0) <= 0).all():
+        st.warning("All ML models have non-positive top-minus-bottom spread. The ranking signal may be weak in this sample.")
+    overfit = leaderboard[(leaderboard["Train Score"].notna()) & (leaderboard["OOS Score"].notna()) & ((leaderboard["Train Score"] - leaderboard["OOS Score"]) > 0.15)]
+    if not overfit.empty:
+        st.warning("Some models show much higher train score than OOS score. Treat those results as overfitting risk.")
 
-    with risk_tab:
-        st.subheader("Factor Exposure Heatmap")
-        if exposures.empty:
-            st.warning("Not enough overlapping returns for factor exposure estimation.")
-        else:
-            st.plotly_chart(px.imshow(exposures, aspect="auto", color_continuous_scale="RdBu", title="Portfolio Factor Betas"), use_container_width=True)
-            st.caption("A2 target: monitor exposures and keep unusually large factor loads under review.")
-        st.subheader("Stress Testing")
-        if stress.empty:
-            st.info("Selected history does not overlap 2008, 2020, or 2022 stress windows.")
-        else:
-            st.dataframe(stress.style.format({"Return": "{:.2%}", "Max Drawdown": "{:.2%}", "Volatility": "{:.2%}"}), use_container_width=True, hide_index=True)
 
-    with execution_tab:
-        st.subheader("Execution Quality Tracking")
-        st.write("Costs use fixed transaction bps plus a square-root market-impact penalty based on monthly trade size.")
-        st.caption("A2 performance tables show net returns after estimated execution costs. Gross-return attribution is a known extension.")
-        if not execution.empty:
-            cost_summary = execution.groupby("Portfolio", as_index=False).agg(
-                Average_Turnover=("Turnover", "mean"),
-                Total_Estimated_Cost=("Market Impact Cost", "sum"),
-                Average_Estimated_Cost=("Market Impact Cost", "mean"),
-                Max_Position_Weight=("Max Position Weight", "max"),
-                Average_Risk_Scale=("Final Risk Scale", "mean"),
-                Min_Risk_Scale=("Final Risk Scale", "min"),
-                Drawdown_Guard_Triggers=("Drawdown Guard Triggered", lambda values: int((values == "Yes").sum())),
-            )
-            st.dataframe(
-                cost_summary.style.format(
-                    {
-                        "Average_Turnover": "{:.2f}x",
-                        "Total_Estimated_Cost": "{:.2%}",
-                        "Average_Estimated_Cost": "{:.2%}",
-                        "Max_Position_Weight": "{:.2%}",
-                        "Average_Risk_Scale": "{:.2%}",
-                        "Min_Risk_Scale": "{:.2%}",
-                        "Drawdown_Guard_Triggers": "{:.0f}",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-        concentrated = execution[execution["Concentration Warning"].eq("Yes")] if "Concentration Warning" in execution else pd.DataFrame()
-        if not concentrated.empty:
-            st.warning("Some portfolios exceeded the 25% max-position concentration check. Review the rows marked in the execution table.")
-        drawdown_guard_rows = execution[execution["Drawdown Guard Triggered"].eq("Yes")] if "Drawdown Guard Triggered" in execution else pd.DataFrame()
-        if not drawdown_guard_rows.empty:
-            st.warning("The drawdown guard was triggered for one or more portfolios. Those portfolios were de-risked for the rest of the affected monthly holding period.")
-        st.dataframe(
-            execution.tail(48).style.format(
-                {
-                    "Turnover": "{:.2f}x",
-                    "Market Impact Cost": "{:.2%}",
-                    "Gross Exposure": "{:.2f}x",
-                    "Net Exposure": "{:.2f}x",
-                    "Max Position Weight": "{:.2%}",
-                    "Realized Volatility": "{:.2%}",
-                    "Vol Target Scale": "{:.2%}",
-                    "Regime Scale": "{:.2%}",
-                    "Final Risk Scale": "{:.2%}",
-                    "Smoothing": "{:.2%}",
-                    "Max Drawdown Limit": "{:.2%}",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-        st.plotly_chart(px.line(execution, x="Date", y="Market Impact Cost", color="Portfolio", title="Estimated Execution Cost"), use_container_width=True)
-        st.plotly_chart(px.line(execution, x="Date", y="Turnover", color="Portfolio", title="Monthly Turnover"), use_container_width=True)
+def render_stage_a2_portfolio_comparison(bundle: dict) -> None:
+    comparison = bundle["portfolio_comparison"].copy()
+    result = bundle["selected_result"]
+    if comparison.empty:
+        st.warning("Portfolio method comparison is unavailable.")
+        return
+    comparison["Recommended"] = comparison["Portfolio Method"].eq(bundle["recommended_method"])
+    st.success(bundle["portfolio_reason"])
+    st.dataframe(
+        comparison[["Portfolio Method", "Recommended", "Total Return", "Sharpe", "Max Drawdown", "Calmar", "Average_Turnover", "Transaction Cost Drag", "Beta", "Ending Value"]].style.format(
+            {
+                "Total Return": "{:.2%}",
+                "Sharpe": "{:.2f}",
+                "Max Drawdown": "{:.2%}",
+                "Calmar": "{:.2f}",
+                "Average_Turnover": "{:.2f}x",
+                "Transaction Cost Drag": "{:.2%}",
+                "Beta": "{:.2f}",
+                "Ending Value": "${:,.0f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    equity = (1 + result[4]).cumprod() * STAGE_A2_INITIAL_CAPITAL
+    st.plotly_chart(px.line(equity, title="Portfolio Method Cumulative Return Comparison"), use_container_width=True)
+    drawdown = (1 + result[4]).cumprod()
+    drawdown = drawdown / drawdown.cummax() - 1
+    st.plotly_chart(px.line(drawdown, title="Portfolio Method Drawdown Comparison"), use_container_width=True)
+    if not result[6].empty:
+        cost_turnover = result[6].groupby("Portfolio", as_index=False).agg(Turnover=("Turnover", "mean"), Cost_Drag=("Market Impact Cost", "sum"))
+        st.plotly_chart(px.bar(cost_turnover, x="Portfolio", y=["Turnover", "Cost_Drag"], barmode="group", title="Turnover and Cost Drag"), use_container_width=True)
 
-    with paper_tab:
-        st.subheader("Working Paper #2 Checklist")
-        st.markdown(
-            """
-- Universe: local equity universe, sector ETFs, and global proxies.
-- ML: Decision Tree, Random Forest, Gradient Boosting, Elastic Net.
-- White-box: feature importance and importance drift.
-- Portfolio: HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, beta-neutral long/short.
-- Risk: rule-based bull/bear/recovery regime proxy, factor exposure heatmap, stress tests.
-- Execution: fixed costs plus square-root market impact.
 
-Use `reports/working_paper_2.md` as the Stage A2 draft.
+def render_stage_a2_white_box_explanation(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    importance = result[3]
+    holdings = bundle["current_holdings"]
+    st.info("This section explains which variables are driving the model's ETF ranking.")
+    if importance.empty:
+        st.warning("Feature importance is unavailable for the selected model.")
+    else:
+        latest = importance.sort_values("Signal Date").groupby("Feature")["Importance"].tail(1)
+        latest = importance.loc[latest.index].sort_values("Importance", ascending=False).head(10)
+        importance_label = latest["Importance Type"].iloc[0] if "Importance Type" in latest else "Feature Importance Fallback, not full SHAP"
+        if "SHAP" not in importance_label:
+            st.warning("Feature Importance Fallback, not full SHAP.")
+        st.plotly_chart(px.bar(latest, x="Importance", y="Feature", orientation="h", title=f"Top 10 Feature Importance: {importance_label}"), use_container_width=True)
+        stability = importance.groupby("Feature")["Importance"].agg(["mean", "std"]).reset_index().sort_values("mean", ascending=False).head(15)
+        st.dataframe(stability.style.format({"mean": "{:.3f}", "std": "{:.3f}"}), use_container_width=True, hide_index=True)
+    if not holdings.empty:
+        st.subheader("Current Top-Ranked ETFs")
+        st.dataframe(holdings.sort_values("ML Rank").head(10), use_container_width=True, hide_index=True)
+
+
+def render_stage_a2_risk_dashboard(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    returns = result[4][recommended]
+    regimes = result[9]
+    exposures = result[11]
+    execution = result[6]
+    close_benchmark = bundle["benchmark"]
+    if regimes.empty:
+        st.warning("Regime detection is unavailable.")
+    else:
+        method = regimes["Regime Method"].iloc[-1] if "Regime Method" in regimes else "Rule-Based Regime Proxy"
+        label = "HMM Regime Detection" if method == "HMM" else "Rule-Based Regime Proxy"
+        st.subheader(label)
+        st.plotly_chart(px.area(regimes.reset_index(), x=regimes.reset_index().columns[0], y="Regime Code", color="Regime", title=label), use_container_width=True)
+    st.subheader("Factor Exposure Monitoring")
+    if exposures.empty:
+        st.info("Factor exposure heatmap is unavailable.")
+    else:
+        st.plotly_chart(px.imshow(exposures, aspect="auto", color_continuous_scale="RdBu", title="Factor Exposure Monitoring"), use_container_width=True)
+    if close_benchmark is not None:
+        aligned = pd.DataFrame({"Strategy": returns, "SPY": close_benchmark.reindex(returns.index)}).dropna()
+        if len(aligned) > 60:
+            st.metric("Beta to SPY", f"{aligned['Strategy'].cov(aligned['SPY']) / aligned['SPY'].var():.2f}")
+            st.metric("Correlation to SPY", f"{aligned['Strategy'].corr(aligned['SPY']):.2f}")
+    st.plotly_chart(px.line((returns.rolling(63).std() * np.sqrt(252)).to_frame("Rolling Volatility"), title="Rolling Volatility"), use_container_width=True)
+    st.plotly_chart(px.line(rolling_sharpe(returns).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True)
+    equity = (1 + returns).cumprod()
+    st.plotly_chart(px.line((equity / equity.cummax() - 1).to_frame("Rolling Drawdown"), title="Rolling Drawdown"), use_container_width=True)
+    if not execution.empty and execution["Max Position Weight"].max() > MAX_LONG_ONLY_WEIGHT:
+        st.warning("Concentration warning: at least one historical rebalance exceeded the max ETF weight guideline.")
+    if not execution.empty:
+        st.metric("Total Transaction Cost Drag Estimate", f"{execution.loc[execution['Portfolio'].eq(recommended), 'Market Impact Cost'].sum():.2%}")
+
+
+def render_stage_a2_stress_tests(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    stress = compare_stress_to_spy(result[4][recommended], bundle["benchmark"])
+    format_map = {
+        "Strategy Return": "{:.2%}",
+        "SPY Return": "{:.2%}",
+        "Strategy Max Drawdown": "{:.2%}",
+        "SPY Max Drawdown": "{:.2%}",
+        "Strategy Volatility": "{:.2%}",
+    }
+    st.dataframe(stress.style.format({key: value for key, value in format_map.items() if key in stress.columns}), use_container_width=True, hide_index=True)
+
+
+def render_stage_a2_methodology(bundle: dict) -> None:
+    st.markdown(
+        """
+### What Stage A2 Is
+Stage A2 is a white-box ML multi-asset ETF rotation strategy. It ranks ETFs monthly, validates predictions walk-forward, and converts the ranking into portfolio weights.
+
+### ML ETF Ranking
+The model scores each ETF using momentum, relative strength, volatility, drawdown, trend, beta, correlation, regime, and lagged macro features. The default target is next-month ETF return.
+
+### Walk-Forward Validation
+Each prediction month trains only on data before that month. Forward returns use `shift(-1)` only to build training targets, not prediction-time features.
+
+### Selection Rules
+The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
+
+### Portfolio Methods
+HRP-style / Risk-Parity Fallback clusters assets when possible and falls back to risk-parity behavior when data is sparse. Ledoit-Wolf Mean-Variance uses shrinkage covariance. Fractional Kelly sizes by score relative to variance. Beta-Neutral ML builds long/short exposure from top and bottom ranks.
+
+### Current Limitations
+This is an ETF proxy universe, not full Russell 3000 / MSCI ACWI constituent coverage. FRED macro features may be included, but GDELT, Google Trends, and SEC EDGAR are not fully implemented in this Stage A2 dashboard. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. Black-Litterman and full TWAP/VWAP simulation are not implemented yet. ML may underperform simple strategies, and this dashboard reports that transparently.
 """
-        )
+    )
+    config_rows = [{"Setting": key, "Value": value} for key, value in bundle["config"].items()]
+    st.dataframe(pd.DataFrame(config_rows), use_container_width=True, hide_index=True)
+
+
+def render_stage_a2_dashboard(stock_universe_file) -> None:
+    st.title("Stage A2: White-Box ML Multi-Asset ETF Rotation Strategy")
+    st.caption("Presentation-focused dashboard: the system compares models and portfolio methods automatically using walk-forward OOS validation.")
+
+    config = STAGE_A2_PRESENTATION_CONFIG
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.DateOffset(years=int(config["Research Window Years"]))
+    selected_symbols = tuple(dict.fromkeys([*SECTOR_ETFS, *GLOBAL_PROXIES]))
+
+    with st.spinner("Loading ETF prices and FRED macro data..."):
+        close = load_stage_a2_prices(selected_symbols, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+        macro = load_fred_macro(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+    if close.empty or close.shape[1] < 8:
+        st.error("Not enough ETF data loaded for Stage A2.")
+        return
+
+    with st.spinner("Running all Stage A2 models, selecting the best model, and comparing portfolio methods..."):
+        bundle = run_stage_a2_presentation_research(close, macro)
+    if not bundle["recommended_method"]:
+        st.error("Stage A2 did not produce enough walk-forward results.")
+        return
+
+    tabs = st.tabs(
+        [
+            "Executive Overview",
+            "Portfolio Performance",
+            "Current Portfolio",
+            "Model Selection",
+            "Portfolio Method Comparison",
+            "White-Box Explanation",
+            "Risk Dashboard",
+            "Stress Tests",
+            "Methodology and Limitations",
+        ]
+    )
+    with tabs[0]:
+        render_stage_a2_executive_overview(bundle)
+    with tabs[1]:
+        render_stage_a2_portfolio_performance(bundle)
+    with tabs[2]:
+        render_stage_a2_current_portfolio(bundle)
+    with tabs[3]:
+        render_stage_a2_model_selection(bundle)
+    with tabs[4]:
+        render_stage_a2_portfolio_comparison(bundle)
+    with tabs[5]:
+        render_stage_a2_white_box_explanation(bundle)
+    with tabs[6]:
+        render_stage_a2_risk_dashboard(bundle)
+    with tabs[7]:
+        render_stage_a2_stress_tests(bundle)
+    with tabs[8]:
+        render_stage_a2_methodology(bundle)
+
+    with st.expander("Advanced Research Details", expanded=False):
+        selected = bundle["selected_result"]
+        st.write("Fixed assumptions are stored in `STAGE_A2_PRESENTATION_CONFIG`; the final dashboard does not ask the audience to tune models or parameters.")
+        st.dataframe(pd.DataFrame([selected[12]]), use_container_width=True, hide_index=True)
+        st.subheader("Walk-Forward Debug Log")
+        st.dataframe(selected[2].tail(60), use_container_width=True, hide_index=True)
+        st.subheader("Execution Details")
+        st.dataframe(selected[6].tail(80), use_container_width=True, hide_index=True)

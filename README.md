@@ -2,13 +2,13 @@
 
 A Streamlit quant research dashboard using free market data. The app now has three modes:
 
-- **Stage A2 Research Lab:** ML-powered multi-asset white-box research pipeline.
+- **Stage A2 Research Lab:** presentation-focused white-box ML multi-asset ETF rotation dashboard.
 - **Stage A1 Research Lab:** linear benchmark research pipeline for the capstone.
 - **Regime-Aware Portfolio Dashboard:** the original ETF/stock strategy dashboard.
 
 ## Features
 
-- Run Stage A2 white-box ML models: Decision Tree, Random Forest, Gradient Boosting, optional XGBoost/LightGBM, and Elastic Net
+- Run and compare Stage A2 white-box ML models automatically using walk-forward OOS metrics
 - Build HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML portfolios
 - Visualize rule-based regime proxy states, factor exposure heatmaps, stress tests, execution costs, and SHAP/native feature importance drift
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
@@ -30,13 +30,21 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 **Stage A1** is the linear benchmark lab. It builds transparent price-based features, trains OLS/Ridge/LASSO/Elastic Net models, and runs true walk-forward portfolio tests. The goal is to create a simple baseline that later ML systems must beat.
 
-**Stage A2** is the white-box ML lab. It adds tree models, optional XGBoost/LightGBM engines, SHAP/native feature importance tracking, macro fields from FRED when available, global ETF proxies, HRP-style allocation, Ledoit-Wolf shrinkage, fractional Kelly, beta-neutral long/short, factor exposure checks, stress tests, and execution-cost estimates.
+**Stage A2** is now a presentation-focused white-box ML ETF rotation dashboard. It compares Elastic Net, Decision Tree, Random Forest, and Gradient Boosting automatically, selects the best model using walk-forward out-of-sample metrics, compares the four portfolio construction methods, and presents the recommended portfolio first.
 
 Both labs use walk-forward logic: each prediction month trains only on data before that month, then trades the following period. Dashboard performance is intended for research and education, not live investment advice.
 
 ## Stage A2 ML Ranking Pipeline
 
-Stage A2 ranks assets each month with a white-box ML model, then passes the ranking scores into the existing HRP-style, Ledoit-Wolf, fractional Kelly, and beta-neutral portfolios. It does not use random K-fold validation. The optional hyperparameter tuner uses time-series-aware walk-forward validation only.
+Stage A2 ranks ETFs each month with a white-box ML model, then passes the ranking scores into the existing HRP-style, Ledoit-Wolf, fractional Kelly, and beta-neutral portfolios. It does not use random K-fold validation. The final audience is not expected to tune model parameters from the UI.
+
+The dashboard automatically:
+
+- Runs Elastic Net, Decision Tree, Random Forest, and Gradient Boosting.
+- Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
+- Compares HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML.
+- Recommends the portfolio method by OOS Sharpe, then drawdown, turnover, and cost drag.
+- Shows current holdings, model explanation, risk diagnostics, stress tests, and methodology in presentation tabs.
 
 XGBoost, LightGBM, SHAP, and hmmlearn are supported as optional engines. If those packages are not installed or are incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
 
