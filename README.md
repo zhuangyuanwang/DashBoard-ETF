@@ -44,7 +44,9 @@ The dashboard automatically:
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Compares HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML.
 - Recommends the portfolio method by OOS Sharpe, then drawdown, turnover, and cost drag.
-- Shows current holdings, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
+- Shows current holdings, a live-period monitor, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
+
+The Stage A2 **Live Monitor** tab uses the latest Yahoo Finance daily bars available to the app to show the recommended strategy from June 1 of the current year through the latest loaded date, compared with SPY. It is a research monitor, not broker-confirmed live execution P&L.
 
 The Stage A2 **Performance Diagnostics** tab is deliberately honest when ML underperforms SPY. It compares the recommended ML strategy against SPY buy-and-hold, equal-weight ETFs, 12-month momentum top 5, and dual momentum; reports ML ranking spread and prediction IC; separates gross and net performance; checks rank turnover, target choice, feature ablations, overfitting risk, and portfolio construction effects.
 

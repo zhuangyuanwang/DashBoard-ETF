@@ -2401,6 +2401,70 @@ def render_stage_a2_stress_tests(bundle: dict) -> None:
     st.dataframe(stress.style.format({key: value for key, value in format_map.items() if key in stress.columns}), use_container_width=True, hide_index=True)
 
 
+def render_stage_a2_live_monitor(bundle: dict) -> None:
+    result = bundle["selected_result"]
+    recommended = bundle["recommended_method"]
+    benchmark = bundle["benchmark"]
+    holdings = bundle["current_holdings"]
+    today = pd.Timestamp.today().normalize()
+    requested_start = pd.Timestamp(year=today.year, month=6, day=1)
+    returns = result[4][recommended].dropna()
+    live_returns = returns.loc[returns.index >= requested_start]
+    if live_returns.empty:
+        st.warning(f"No live-period return rows are available from {requested_start.date()} to {today.date()}. This can happen if Yahoo has not returned current-month bars yet.")
+        return
+    live_start = live_returns.index.min()
+    live_end = live_returns.index.max()
+    spy_live = benchmark.reindex(live_returns.index).fillna(0.0) if benchmark is not None else pd.Series(dtype=float)
+    strategy_equity = (1 + live_returns).cumprod()
+    spy_equity = (1 + spy_live).cumprod() if not spy_live.empty else pd.Series(dtype=float)
+    strategy_total = strategy_equity.iloc[-1] - 1
+    spy_total = spy_equity.iloc[-1] - 1 if not spy_equity.empty else np.nan
+    live_value = STAGE_A2_INITIAL_CAPITAL * strategy_equity.iloc[-1]
+    live_drawdown = strategy_equity / strategy_equity.cummax() - 1
+
+    st.subheader(f"Live Monitor: {requested_start.date()} to {today.date()}")
+    st.caption(
+        "This is a live-ish research monitor using the latest Yahoo Finance daily bars available to the app. "
+        "It is not broker-confirmed execution P&L."
+    )
+    cols = st.columns(5)
+    cols[0].metric("Recommended Method", recommended)
+    cols[1].metric("Live Portfolio Value", f"${live_value:,.0f}")
+    cols[2].metric("Strategy Return", f"{strategy_total:.2%}")
+    cols[3].metric("SPY Return", f"{spy_total:.2%}" if pd.notna(spy_total) else "N/A")
+    cols[4].metric("Live Max Drawdown", f"{live_drawdown.min():.2%}")
+    if pd.notna(spy_total):
+        st.info(
+            f"From {live_start.date()} to {live_end.date()}, Stage A2 returned {strategy_total:.2%} "
+            f"versus SPY {spy_total:.2%}. Difference: {strategy_total - spy_total:.2%}."
+        )
+
+    live_curve = pd.DataFrame({"Stage A2": strategy_equity * STAGE_A2_INITIAL_CAPITAL})
+    if not spy_equity.empty:
+        live_curve["SPY"] = spy_equity * STAGE_A2_INITIAL_CAPITAL
+    st.plotly_chart(px.line(live_curve, title="$1,000,000 Live-Period Equity Curve"), use_container_width=True)
+    st.plotly_chart(px.line(live_drawdown.to_frame("Stage A2 Drawdown"), title="Live-Period Drawdown"), use_container_width=True)
+
+    st.subheader("Current Recommended Holdings")
+    if holdings.empty:
+        st.warning("Current holdings are unavailable.")
+    else:
+        st.dataframe(
+            holdings[["ETF", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format(
+                {"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+    daily = pd.DataFrame({"Stage A2 Daily Return": live_returns})
+    if not spy_live.empty:
+        daily["SPY Daily Return"] = spy_live
+        daily["Excess vs SPY"] = daily["Stage A2 Daily Return"] - daily["SPY Daily Return"]
+    st.subheader("Live Daily Returns")
+    st.dataframe(daily.tail(30).style.format("{:.2%}"), use_container_width=True)
+
+
 def render_stage_a2_methodology(bundle: dict) -> None:
     st.markdown(
         """
@@ -2452,6 +2516,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     tabs = st.tabs(
         [
             "Executive Overview",
+            "Live Monitor",
             "Performance Diagnostics",
             "Portfolio Performance",
             "Current Portfolio",
@@ -2466,22 +2531,24 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     with tabs[0]:
         render_stage_a2_executive_overview(bundle)
     with tabs[1]:
-        render_stage_a2_performance_diagnostics(bundle)
+        render_stage_a2_live_monitor(bundle)
     with tabs[2]:
-        render_stage_a2_portfolio_performance(bundle)
+        render_stage_a2_performance_diagnostics(bundle)
     with tabs[3]:
-        render_stage_a2_current_portfolio(bundle)
+        render_stage_a2_portfolio_performance(bundle)
     with tabs[4]:
-        render_stage_a2_model_selection(bundle)
+        render_stage_a2_current_portfolio(bundle)
     with tabs[5]:
-        render_stage_a2_portfolio_comparison(bundle)
+        render_stage_a2_model_selection(bundle)
     with tabs[6]:
-        render_stage_a2_white_box_explanation(bundle)
+        render_stage_a2_portfolio_comparison(bundle)
     with tabs[7]:
-        render_stage_a2_risk_dashboard(bundle)
+        render_stage_a2_white_box_explanation(bundle)
     with tabs[8]:
-        render_stage_a2_stress_tests(bundle)
+        render_stage_a2_risk_dashboard(bundle)
     with tabs[9]:
+        render_stage_a2_stress_tests(bundle)
+    with tabs[10]:
         render_stage_a2_methodology(bundle)
 
     with st.expander("Advanced Research Details", expanded=False):
