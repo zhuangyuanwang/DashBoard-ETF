@@ -484,6 +484,7 @@ def build_stage_a2_portfolios(
     target_volatility: float,
     smoothing: float,
     enable_regime_overlay: bool,
+    max_drawdown_limit: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     if predictions.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -493,6 +494,8 @@ def build_stage_a2_portfolios(
     strategy_names = ["HRP-style / Risk-Parity Fallback", "Ledoit-Wolf Mean-Variance", "Fractional Kelly", "Beta-Neutral ML"]
     returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     previous_weights = {name: pd.Series(0.0, index=close.columns) for name in strategy_names}
+    equity_state = {name: 1.0 for name in strategy_names}
+    peak_state = {name: 1.0 for name in strategy_names}
     execution_rows = []
 
     for idx in range(18, len(month_ends) - 1):
@@ -532,9 +535,28 @@ def build_stage_a2_portfolios(
                 enable_regime_overlay,
             )
             cost = apply_square_root_market_impact(weights, previous_weights[strategy_name], base_cost_bps, impact_bps)
-            period_returns = daily_returns.loc[period_mask, weights.index].dot(weights)
-            if len(period_returns) > 0:
-                period_returns.iloc[0] -= cost
+            raw_period_returns = daily_returns.loc[period_mask, weights.index].dot(weights)
+            period_returns = raw_period_returns.copy()
+            drawdown_guard_triggered = False
+            stopped_for_period = False
+            for day_idx, day in enumerate(period_returns.index):
+                if stopped_for_period:
+                    period_returns.loc[day] = 0.0
+                    continue
+                net_return = raw_period_returns.loc[day]
+                if day_idx == 0:
+                    net_return -= cost
+                peak = max(peak_state[strategy_name], equity_state[strategy_name])
+                tentative_equity = equity_state[strategy_name] * (1 + net_return)
+                if tentative_equity / peak - 1 < -max_drawdown_limit:
+                    floor_equity = peak * (1 - max_drawdown_limit)
+                    net_return = floor_equity / equity_state[strategy_name] - 1
+                    tentative_equity = floor_equity
+                    drawdown_guard_triggered = True
+                    stopped_for_period = True
+                period_returns.loc[day] = net_return
+                equity_state[strategy_name] = tentative_equity
+                peak_state[strategy_name] = max(peak_state[strategy_name], equity_state[strategy_name])
             returns_by_strategy[strategy_name].loc[period_mask] = period_returns
             turnover = (weights - previous_weights[strategy_name]).abs().sum()
             execution_rows.append(
@@ -549,6 +571,8 @@ def build_stage_a2_portfolios(
                     "Concentration Warning": "Yes" if weights.max() > MAX_LONG_ONLY_WEIGHT + 1e-9 else "No",
                     "Long Count": int((weights > 0).sum()),
                     "Short Count": int((weights < 0).sum()),
+                    "Max Drawdown Limit": max_drawdown_limit,
+                    "Drawdown Guard Triggered": "Yes" if drawdown_guard_triggered else "No",
                     **overlay_info,
                 }
             )
@@ -694,6 +718,7 @@ def run_stage_a2_research(
     target_volatility: float,
     smoothing: float,
     enable_regime_overlay: bool,
+    max_drawdown_limit: float,
 ):
     x, y = build_stage_a2_features(close, macro)
     diagnostics = {
@@ -752,6 +777,7 @@ def run_stage_a2_research(
         target_volatility,
         smoothing,
         enable_regime_overlay,
+        max_drawdown_limit,
     )
     if portfolio_returns.empty:
         return x, predictions, walk_log, importance_history, portfolio_returns, execution, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), diagnostics
@@ -788,6 +814,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         target_volatility = st.slider("Target volatility", min_value=0.06, max_value=0.20, value=0.12, step=0.01)
         smoothing = st.slider("Weight smoothing", min_value=0.00, max_value=0.80, value=0.25, step=0.05)
         enable_regime_overlay = st.toggle("Regime risk overlay", value=False)
+        max_drawdown_limit = st.slider("Max drawdown guard", min_value=0.05, max_value=0.25, value=0.15, step=0.01)
 
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=years)
@@ -811,6 +838,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             target_volatility,
             smoothing,
             enable_regime_overlay,
+            max_drawdown_limit,
         )
         if portfolio_returns.empty:
             st.error("Not enough walk-forward predictions to build Stage A2 portfolios.")
@@ -837,7 +865,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         st.caption(
             "Performance is net of fixed transaction costs and square-root market-impact estimates. "
             "The default settings use a simpler Decision Tree, volatility targeting, and weight smoothing because this has been more stable in the current walk-forward sample. "
-            "Turn on the regime overlay when you want a more defensive profile, but expect it to reduce upside in some samples."
+            "The max drawdown guard is applied on daily backtest bars and de-risks a portfolio after the threshold is reached."
         )
         best = metrics.sort_values("Sharpe", ascending=False).iloc[0]
         m1, m2, m3, m4 = st.columns(4)
@@ -956,6 +984,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                 Max_Position_Weight=("Max Position Weight", "max"),
                 Average_Risk_Scale=("Final Risk Scale", "mean"),
                 Min_Risk_Scale=("Final Risk Scale", "min"),
+                Drawdown_Guard_Triggers=("Drawdown Guard Triggered", lambda values: int((values == "Yes").sum())),
             )
             st.dataframe(
                 cost_summary.style.format(
@@ -966,6 +995,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                         "Max_Position_Weight": "{:.2%}",
                         "Average_Risk_Scale": "{:.2%}",
                         "Min_Risk_Scale": "{:.2%}",
+                        "Drawdown_Guard_Triggers": "{:.0f}",
                     }
                 ),
                 use_container_width=True,
@@ -974,6 +1004,9 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         concentrated = execution[execution["Concentration Warning"].eq("Yes")] if "Concentration Warning" in execution else pd.DataFrame()
         if not concentrated.empty:
             st.warning("Some portfolios exceeded the 25% max-position concentration check. Review the rows marked in the execution table.")
+        drawdown_guard_rows = execution[execution["Drawdown Guard Triggered"].eq("Yes")] if "Drawdown Guard Triggered" in execution else pd.DataFrame()
+        if not drawdown_guard_rows.empty:
+            st.warning("The drawdown guard was triggered for one or more portfolios. Those portfolios were de-risked for the rest of the affected monthly holding period.")
         st.dataframe(
             execution.tail(48).style.format(
                 {
@@ -987,6 +1020,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
                     "Regime Scale": "{:.2%}",
                     "Final Risk Scale": "{:.2%}",
                     "Smoothing": "{:.2%}",
+                    "Max Drawdown Limit": "{:.2%}",
                 }
             ),
             use_container_width=True,
