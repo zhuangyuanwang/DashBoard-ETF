@@ -9,7 +9,7 @@ import yfinance as yf
 
 STAGE_A2_INITIAL_CAPITAL = 1_000_000
 SECTOR_ETFS = ["XLF", "XLE", "XLK", "XLI", "XLP", "XLU", "XLV"]
-GLOBAL_PROXIES = ["SPY", "EFA", "EWJ", "EEM", "IWM", "VGK", "TLT", "IEF", "GLD", "DBC", "HYG", "LQD"]
+GLOBAL_PROXIES = ["SPY", "QQQ", "IWM", "EFA", "EEM", "EWJ", "VGK", "TLT", "IEF", "SHY", "GLD", "DBC", "HYG", "LQD"]
 A2_ETF_SYMBOLS = set(SECTOR_ETFS + GLOBAL_PROXIES)
 MAX_LONG_ONLY_WEIGHT = 0.05
 TARGET_TYPES = [
@@ -26,12 +26,11 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Transaction Cost Bps": 10.0,
     "Square-Root Impact Bps": 6.0,
     "Candidate Stock Holdings": [30, 40, 50],
-    "Default Stock Holdings": 40,
+    "Default Stock Holdings": 30,
     "Max Stock Weight": MAX_LONG_ONLY_WEIGHT,
     "Benchmark": "SPY",
     "Research Window Years": 10,
-    "Target Type": "Next-month raw return",
-    "Kelly Fraction": 0.25,
+    "Target Type": "Next-month excess return vs SPY",
     "Target Volatility": 0.12,
     "Weight Smoothing": 0.0,
     "Regime Overlay": True,
@@ -960,7 +959,7 @@ def build_stage_a2_portfolios(
     daily_returns = close.pct_change(fill_method=None).dropna()
     prediction_frame = predictions.rename("score").reset_index().set_index("date")
     month_ends = close.resample("ME").last().index
-    strategy_names = ["HRP-style / Risk-Parity Fallback", "Ledoit-Wolf Mean-Variance", "Fractional Kelly", "Beta-Neutral ML"]
+    strategy_names = ["Equal Weight Top N", "Score Weighted Top N", "Inverse-Vol / Risk-Parity Style Top N", "Beta-Neutral Long/Short"]
     returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     gross_returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     previous_weights = {name: pd.Series(0.0, index=close.columns) for name in strategy_names}
@@ -988,11 +987,17 @@ def build_stage_a2_portfolios(
         lookback = daily_returns.loc[:signal_date].tail(252)
 
         target_weights = {}
-        hrp_weight, _ = cap_and_redistribute_long_weights(hrp_weights(lookback[top_assets]))
-        target_weights["HRP-style / Risk-Parity Fallback"] = hrp_weight.reindex(close.columns).fillna(0.0)
-        target_weights["Ledoit-Wolf Mean-Variance"] = ledoit_wolf_weights(lookback, scores.head(max(1, top_n))).reindex(close.columns).fillna(0.0)
-        target_weights["Fractional Kelly"] = fractional_kelly_weights(lookback, scores.head(max(1, top_n)), kelly_fraction).reindex(close.columns).fillna(0.0)
-        target_weights["Beta-Neutral ML"] = beta_neutral_weights(lookback, scores).reindex(close.columns).fillna(0.0)
+        equal_weight = pd.Series(1 / len(top_assets), index=top_assets)
+        target_weights["Equal Weight Top N"] = equal_weight.reindex(close.columns).fillna(0.0)
+        top_scores = scores.head(max(1, top_n))
+        shifted_scores = top_scores - top_scores.min() + 1e-6
+        if shifted_scores.sum() <= 0:
+            shifted_scores = pd.Series(1.0, index=top_scores.index)
+        score_weight, _ = cap_and_redistribute_long_weights(shifted_scores)
+        target_weights["Score Weighted Top N"] = score_weight.reindex(close.columns).fillna(0.0)
+        inverse_vol_weight, _ = cap_and_redistribute_long_weights(hrp_weights(lookback[top_assets]))
+        target_weights["Inverse-Vol / Risk-Parity Style Top N"] = inverse_vol_weight.reindex(close.columns).fillna(0.0)
+        target_weights["Beta-Neutral Long/Short"] = beta_neutral_weights(lookback, scores).reindex(close.columns).fillna(0.0)
 
         period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_date)
         if not period_mask.any():
@@ -1397,13 +1402,13 @@ def select_best_stage_a2_model(model_results: dict[str, tuple], benchmark: pd.Se
     if leaderboard.empty:
         return "", leaderboard, "No model produced enough walk-forward out-of-sample results."
     leaderboard = leaderboard.sort_values(
-        ["OOS Sharpe", "OOS Max Drawdown", "Top-Minus-Bottom Spread", "Average Turnover"],
+        ["Top-Minus-Bottom Spread", "OOS Sharpe", "OOS Max Drawdown", "Average Turnover"],
         ascending=[False, False, False, True],
     ).reset_index(drop=True)
     selected = leaderboard.iloc[0]["Model"]
     reason = (
-        f"{selected} was selected because it had the strongest walk-forward OOS Sharpe "
-        f"({leaderboard.iloc[0]['OOS Sharpe']:.2f}), with drawdown and turnover used as tie-breakers."
+        f"{selected} was selected because it had the strongest walk-forward ranking spread "
+        f"({leaderboard.iloc[0]['Top-Minus-Bottom Spread']:.2%}); OOS Sharpe, drawdown, and turnover were tie-breakers."
     )
     if benchmark is not None and not benchmark.empty:
         spy_metrics = calculate_metrics(benchmark.to_frame("SPY"))
@@ -1463,7 +1468,7 @@ def select_stage_a2_holding_count(
             base_result[1],
             config["Transaction Cost Bps"],
             config["Square-Root Impact Bps"],
-            config["Kelly Fraction"],
+            0.25,
             config["Target Volatility"],
             config["Weight Smoothing"],
             config["Regime Overlay"],
@@ -1585,8 +1590,10 @@ def backtest_simple_rotation_benchmark(
     method: str,
     top_n: int = 5,
     base_cost_bps: float = 10.0,
+    eligible_symbols: tuple[str, ...] | None = None,
 ) -> tuple[pd.Series, pd.Series, pd.DataFrame]:
     daily_returns = close.pct_change(fill_method=None).dropna()
+    universe = [symbol for symbol in (eligible_symbols or tuple(close.columns)) if symbol in close.columns]
     month_ends = close.resample("ME").last().index
     net = pd.Series(0.0, index=daily_returns.index)
     gross = pd.Series(0.0, index=daily_returns.index)
@@ -1602,13 +1609,15 @@ def backtest_simple_rotation_benchmark(
         if method == "SPY Buy-and-Hold":
             if "SPY" in weights.index:
                 weights["SPY"] = 1.0
-        elif method == "Equal-Weight ETF Universe":
-            weights[:] = 1.0 / len(weights)
+        elif method == "Equal-Weight Stock Universe":
+            if universe:
+                weights[universe] = 1.0 / len(universe)
         else:
-            lookback_return = close.loc[:signal_date].iloc[-1] / close.loc[:signal_date].iloc[max(0, len(close.loc[:signal_date]) - 252)] - 1
+            lookback_close = close[list(universe)].loc[:signal_date] if universe else close.loc[:signal_date]
+            lookback_return = lookback_close.iloc[-1] / lookback_close.iloc[max(0, len(lookback_close) - 252)] - 1
             ranked = lookback_return.dropna().sort_values(ascending=False)
             selected = ranked.head(top_n).index.tolist()
-            if method == "Dual Momentum Top 5":
+            if method.startswith("Dual Momentum"):
                 selected = [symbol for symbol in selected if ranked.get(symbol, 0.0) > 0]
                 if not selected:
                     defensive = [symbol for symbol in ["IEF", "TLT", "SPY"] if symbol in close.columns]
@@ -1627,17 +1636,23 @@ def backtest_simple_rotation_benchmark(
     return net, gross, pd.DataFrame(rows)
 
 
-def build_stage_a2_benchmark_comparison(close: pd.DataFrame, recommended_returns: pd.Series, benchmark: pd.Series | None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_stage_a2_benchmark_comparison(
+    close: pd.DataFrame,
+    recommended_returns: pd.Series,
+    benchmark: pd.Series | None,
+    eligible_symbols: tuple[str, ...] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     returns_map = {"Stage A2 Recommended ML": recommended_returns}
     turnover_map = {"Stage A2 Recommended ML": np.nan}
     cost_drag_map = {"Stage A2 Recommended ML": np.nan}
     execution_rows = []
-    for method in ["SPY Buy-and-Hold", "Equal-Weight ETF Universe", "12M Momentum Top 5", "Dual Momentum Top 5"]:
+    for method in ["SPY Buy-and-Hold", "Equal-Weight Stock Universe", "12M Momentum Top 30", "Dual Momentum Top 30"]:
         net, gross, execution = backtest_simple_rotation_benchmark(
             close,
             method,
             top_n=int(STAGE_A2_PRESENTATION_CONFIG["Default Stock Holdings"]),
             base_cost_bps=float(STAGE_A2_PRESENTATION_CONFIG["Transaction Cost Bps"]),
+            eligible_symbols=eligible_symbols,
         )
         returns_map[method] = net.reindex(recommended_returns.index).fillna(0.0)
         turnover_map[method] = execution["Turnover"].mean() if not execution.empty else np.nan
@@ -1735,7 +1750,7 @@ def backtest_ml_equal_weight_top_n(
             period.iloc[0] -= cost
         gross.loc[period_mask] = raw
         net.loc[period_mask] = period
-        rows.append({"Date": signal_date, "Portfolio": "Equal-Weight ML Top 5", "Turnover": (weights - previous).abs().sum(), "Market Impact Cost": cost})
+        rows.append({"Date": signal_date, "Portfolio": f"Equal-Weight ML Top {top_n}", "Turnover": (weights - previous).abs().sum(), "Market Impact Cost": cost})
         previous = weights
     return net, gross, pd.DataFrame(rows)
 
@@ -1785,7 +1800,7 @@ def run_stage_a2_feature_subset_diagnostic(
         predictions,
         config["Transaction Cost Bps"],
         config["Square-Root Impact Bps"],
-        config["Kelly Fraction"],
+        0.25,
         config["Target Volatility"],
         0.0,
         config["Regime Overlay"],
@@ -1821,7 +1836,7 @@ def run_stage_a2_target_diagnostic(close: pd.DataFrame, macro: pd.DataFrame, mod
             model_name,
             config["Transaction Cost Bps"],
             config["Square-Root Impact Bps"],
-            config["Kelly Fraction"],
+            0.25,
             config["Target Volatility"],
             0.0,
             config["Regime Overlay"],
@@ -1861,7 +1876,7 @@ def build_stage_a2_performance_diagnostics(close: pd.DataFrame, macro: pd.DataFr
     recommended = bundle["recommended_method"]
     benchmark = bundle["benchmark"]
     recommended_returns = result[4][recommended]
-    benchmark_table, simple_execution = build_stage_a2_benchmark_comparison(close, recommended_returns, benchmark)
+    benchmark_table, simple_execution = build_stage_a2_benchmark_comparison(close, recommended_returns, benchmark, bundle.get("eligible_symbols"))
     if not benchmark_table.empty:
         ml_mask = benchmark_table["Strategy"].eq("Stage A2 Recommended ML")
         method_execution = result[6][result[6]["Portfolio"].eq(recommended)] if not result[6].empty else pd.DataFrame()
@@ -1877,11 +1892,12 @@ def build_stage_a2_performance_diagnostics(close: pd.DataFrame, macro: pd.DataFr
         int(bundle.get("selected_holding_count", STAGE_A2_PRESENTATION_CONFIG["Default Stock Holdings"])),
         float(STAGE_A2_PRESENTATION_CONFIG["Transaction Cost Bps"]),
     )
+    ml_equal_name = f"Equal-Weight ML Top {int(bundle.get('selected_holding_count', STAGE_A2_PRESENTATION_CONFIG['Default Stock Holdings']))}"
     ml_equal_metrics = format_diagnostic_metrics(
-        {"Equal-Weight ML Top 5": ml_equal_net.reindex(recommended_returns.index).fillna(0.0)},
+        {ml_equal_name: ml_equal_net.reindex(recommended_returns.index).fillna(0.0)},
         benchmark,
-        {"Equal-Weight ML Top 5": ml_equal_execution["Turnover"].mean() if not ml_equal_execution.empty else np.nan},
-        {"Equal-Weight ML Top 5": ((1 + ml_equal_gross.reindex(recommended_returns.index).fillna(0.0)).prod() - 1) - ((1 + ml_equal_net.reindex(recommended_returns.index).fillna(0.0)).prod() - 1)},
+        {ml_equal_name: ml_equal_execution["Turnover"].mean() if not ml_equal_execution.empty else np.nan},
+        {ml_equal_name: ((1 + ml_equal_gross.reindex(recommended_returns.index).fillna(0.0)).prod() - 1) - ((1 + ml_equal_net.reindex(recommended_returns.index).fillna(0.0)).prod() - 1)},
     )
     target_comparison = pd.DataFrame()
     feature_ablation = pd.DataFrame()
@@ -1930,9 +1946,9 @@ def stage_a2_plain_english_diagnosis(bundle: dict, diagnostics: dict) -> list[st
         ml_return = metrics.loc[metrics["Series"].eq(recommended), "Total Return"].iloc[0]
         spy_return = benchmark_table.loc[benchmark_table["Strategy"].eq("SPY Buy-and-Hold"), "Total Return"].iloc[0]
         rows.append("ML underperforms SPY because the period favored buy-and-hold equity beta." if ml_return < spy_return else "ML outperformed SPY on total return in this sample.")
-    if not benchmark_table.empty and "12M Momentum Top 5" in benchmark_table["Strategy"].values:
+    if not benchmark_table.empty and "12M Momentum Top 30" in benchmark_table["Strategy"].values:
         ml_return = metrics.loc[metrics["Series"].eq(recommended), "Total Return"].iloc[0]
-        mom_return = benchmark_table.loc[benchmark_table["Strategy"].eq("12M Momentum Top 5"), "Total Return"].iloc[0]
+        mom_return = benchmark_table.loc[benchmark_table["Strategy"].eq("12M Momentum Top 30"), "Total Return"].iloc[0]
         rows.append("Current ML model does not add value over the simple 12-month momentum benchmark." if ml_return < mom_return else "Current ML model adds value over the simple 12-month momentum benchmark in this sample.")
     target_comparison = diagnostics.get("target_comparison", pd.DataFrame())
     target = (
@@ -1989,7 +2005,7 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame,
             model_name,
             config["Transaction Cost Bps"],
             config["Square-Root Impact Bps"],
-            config["Kelly Fraction"],
+            0.25,
             config["Target Volatility"],
             config["Weight Smoothing"],
             config["Regime Overlay"],
@@ -2369,6 +2385,10 @@ def render_stage_a2_current_portfolio(bundle: dict) -> None:
         hide_index=True,
     )
     st.plotly_chart(px.bar(holdings, x="Ticker", y="Weight", color="Category", title="Current Holdings"), use_container_width=True, key="a2_current_holdings_bar")
+    sector_exposure = holdings.groupby("Category", as_index=False)["Weight"].sum().sort_values("Weight", ascending=False)
+    st.plotly_chart(px.bar(sector_exposure, x="Category", y="Weight", title="Current Sector Exposure"), use_container_width=True, key="a2_current_sector_exposure")
+    if not sector_exposure.empty and sector_exposure["Weight"].max() > 0.25:
+        st.warning("Sector concentration warning: one sector exceeds the 25% guideline.")
     if holdings["Weight"].abs().max() > MAX_LONG_ONLY_WEIGHT + 1e-9:
         st.warning("One or more stock weights exceed the 5% max stock weight guideline.")
     if holdings["Weight"].abs().head(3).sum() > 0.75:
@@ -2594,7 +2614,7 @@ Each prediction month trains only on data before that month. Forward returns use
 The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The holding count is selected from 30/40/50 stocks using OOS metrics. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
 
 ### Portfolio Methods
-HRP-style / Risk-Parity Fallback clusters assets when possible and falls back to risk-parity behavior when data is sparse. Ledoit-Wolf Mean-Variance uses shrinkage covariance. Fractional Kelly sizes by score relative to variance. Beta-Neutral ML builds long/short exposure from top and bottom ranks.
+Equal Weight Top N is the simple baseline. Score Weighted Top N gives larger weights to stronger ML scores subject to the 5% cap. Inverse-Vol / Risk-Parity Style Top N gives more weight to lower-volatility names. Beta-Neutral Long/Short is labeled as an extension because it uses short exposure.
 
 ### Current Limitations
 This uses the local stock universe file rather than full point-in-time Russell 3000 / MSCI ACWI constituent coverage. FRED macro features may be included, but GDELT, Google Trends, and SEC EDGAR are not fully implemented in this Stage A2 dashboard. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. Black-Litterman and full TWAP/VWAP simulation are not implemented yet. ML may underperform simple strategies, and this dashboard reports that transparently.

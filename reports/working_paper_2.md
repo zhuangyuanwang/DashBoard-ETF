@@ -1,66 +1,57 @@
-# Working Paper #2: ML-Powered Multi-Asset White-Box Allocation
+# Working Paper #2: White-Box ML Stock Selection
 
-## Abstract
+## 1. Abstract
 
-This paper extends the Stage A1 linear benchmark into an intermediate ML-powered multi-asset framework. The system uses free market and macro data, white-box machine learning models, walk-forward validation, feature importance tracking, regime detection, and institutional-style portfolio construction methods.
+Stage A2 builds a presentation-ready, white-box machine learning stock selection strategy. The system ranks stocks by predicted next-month excess return versus SPY, constructs a long-only portfolio from the highest-ranked names, and evaluates the strategy with walk-forward out-of-sample validation.
 
-## 1. Research Objective
+## 2. Introduction
 
-Stage A2 asks whether transparent machine learning models can improve out-of-sample multi-asset allocation after realistic costs, square-root market impact, factor exposure monitoring, and stress testing.
+The research question is whether transparent ML models can add stock-selection value beyond SPY, equal-weight stocks, and simple momentum after transaction costs and turnover.
 
-## 2. Data
+## 3. Data and Universe
 
-The current dashboard uses Yahoo Finance prices for a local equity universe, sector ETFs, and global proxies including EFA, EWJ, EEM, IWM, VGK, TLT, IEF, GLD, DBC, HYG, and LQD. It also attempts to load free FRED macro series such as Treasury yields, Fed funds, CPI, unemployment, and the 10Y-2Y yield curve.
+The dashboard uses `data/stock_universe.csv` as the current stock universe, with SPY and ETF proxies used for benchmark, sector context, and risk monitoring. Prices come from Yahoo Finance. FRED macro data is included when available and lagged before use.
 
-## 3. Models
+## 4. Feature Engineering
 
-The Stage A2 dashboard includes:
+Features include momentum, relative strength versus SPY, volatility, drawdown, trend, beta, correlations, market context, and lagged macro variables. Features at month-end `t` are used to predict returns from `t` to `t+1`.
 
-- Decision Tree
-- Random Forest
-- Gradient Boosting
-- Elastic Net
+## 5. Target Design
 
-Tree-based feature importance is tracked through time as a white-box interpretability layer. XGBoost, LightGBM, and full SHAP can be added later as optional heavier dependencies.
+The primary target is next-month excess return versus SPY. This focuses the model on stock selection rather than market-direction timing. Alternative targets are kept as diagnostics, not as a way to optimize the final test period.
 
-## 4. Portfolio Construction
+## 6. Model Framework
 
-The framework converts monthly walk-forward predictions into:
+The default fast model ladder includes Elastic Net, Decision Tree, and Random Forest. Heavier engines such as Gradient Boosting, XGBoost, LightGBM, and full SHAP are supported as future or advanced research extensions but are not run by default on Streamlit Cloud.
 
-- HRP-style / risk-parity fallback top ML basket
-- Ledoit-Wolf shrinkage mean-variance portfolio
-- Fractional Kelly portfolio
-- Beta-neutral long/short ML portfolio
+## 7. Walk-Forward Validation
 
-## 5. Risk Management
+Each prediction month trains only on prior months, predicts the next month cross-section, ranks stocks, and forms the next monthly portfolio. Random K-fold cross-validation is not used.
 
-The dashboard includes:
+## 8. Portfolio Construction
 
-- Rule-based / Gaussian-mixture bull, bear, and recovery regime proxy visualization
-- Factor exposure heatmaps
-- Stress windows for 2008, 2020, and 2022 when data history overlaps
-- Beta monitoring
-- Rolling drawdown
+The dashboard compares Equal Weight Top N, Score Weighted Top N, Inverse-Vol / Risk-Parity Style Top N, and Beta-Neutral Long/Short. The system tests 30, 40, and 50 stock holding counts and chooses using walk-forward OOS metrics.
 
-## 6. Execution
+## 9. Risk Management
 
-Execution cost modeling uses fixed transaction bps plus a square-root market-impact penalty. The dashboard tracks monthly turnover, estimated impact cost, gross exposure, net exposure, and long/short counts.
+Risk monitoring includes single-name concentration, sector exposure, beta to SPY, rolling volatility, rolling drawdown, rolling Sharpe, turnover, transaction cost drag, and regime proxy information when available.
 
-## 7. Results
+## 10. Execution Cost Assumptions
 
-Results should be filled from the Stage A2 dashboard after selecting the final universe, model, cost assumptions, and Kelly fraction.
+The backtest applies fixed transaction costs and a simplified square-root market-impact estimate based on monthly turnover. Results are shown gross and net where available.
 
-## 8. Limitations
+## 11. Results
 
-This implementation is an A2 production-oriented MVP, not the final institutional research stack. Current limitations include simplified constituent history, rule-based regime proxy detection through Gaussian mixture states rather than a true HMM, HRP-style allocation with risk-parity fallback behavior when clustering inputs are sparse, no full SHAP dependency by default, and limited alternative data beyond FRED and market proxies.
+Final results should be read from the live dashboard because they update with the latest Yahoo Finance data. Poor ML performance versus SPY or momentum is reported directly rather than hidden.
 
-## 9. Next Steps
+## 12. Diagnostics
 
-Recommended extensions:
+Diagnostics include benchmark comparison, top-minus-bottom ranking spread, prediction IC, rank turnover, gross-versus-net performance, target diagnostics, feature ablation, and portfolio construction comparison.
 
-- Add optional XGBoost or LightGBM.
-- Add full SHAP TreeExplainer output.
-- Add GDELT event/sentiment features.
-- Add Google Trends topic features.
-- Add SEC EDGAR earnings filing metadata.
-- Add full HMM with transition matrix if `hmmlearn` is accepted as a dependency.
+## 13. Limitations
+
+The current version uses a practical stock universe file rather than point-in-time S&P 500 membership. Yahoo Finance data can have survivorship bias, missing history, and incomplete fundamentals. GDELT, Google Trends, SEC EDGAR, Black-Litterman, and full TWAP/VWAP simulation are future extensions unless explicitly implemented. Feature importance is not full SHAP unless SHAP is actually used.
+
+## 14. Future Work
+
+Future work includes larger cached universes, stronger point-in-time membership controls, optional XGBoost/LightGBM runs, richer alternative data, stricter sector constraints, and execution simulation improvements.

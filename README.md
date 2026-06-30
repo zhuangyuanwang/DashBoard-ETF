@@ -9,7 +9,7 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 ## Features
 
 - Run and compare Stage A2 white-box ML models automatically using walk-forward OOS metrics
-- Build HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML portfolios
+- Build Equal Weight, Score Weighted, Inverse-Vol / Risk-Parity Style, and beta-neutral research portfolios
 - Visualize rule-based regime proxy states, factor exposure heatmaps, stress tests, execution costs, and SHAP/native feature importance drift
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
 - Build 12-1 momentum, low-volatility, beta, drawdown, and trend features
@@ -36,20 +36,20 @@ Both labs use walk-forward logic: each prediction month trains only on data befo
 
 ## Stage A2 ML Ranking Pipeline
 
-Stage A2 ranks stocks each month with a white-box ML model, then passes the ranking scores into the existing HRP-style, Ledoit-Wolf, fractional Kelly, and beta-neutral research portfolios. It does not use random K-fold validation. The final audience is not expected to tune model parameters from the UI.
+Stage A2 ranks stocks each month by predicted next-month excess return versus SPY, then passes the ranking scores into Equal Weight, Score Weighted, Inverse-Vol / Risk-Parity Style, and beta-neutral research portfolios. It does not use random K-fold validation. The final audience is not expected to tune model parameters from the UI.
 
 The dashboard automatically:
 
 - Runs the default fast model set: Elastic Net, Decision Tree, and Random Forest. Heavier engines such as Gradient Boosting, XGBoost, and LightGBM remain supported in code but are not run by default on Streamlit Cloud.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Selects the number of stocks to hold from 30, 40, or 50 using walk-forward OOS diagnostics.
-- Compares HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML.
+- Compares Equal Weight Top N, Score Weighted Top N, Inverse-Vol / Risk-Parity Style Top N, and Beta-Neutral Long/Short.
 - Recommends the portfolio method by OOS Sharpe, then drawdown, turnover, and cost drag.
 - Shows current holdings, a live-period monitor, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
 
 The Stage A2 **Live Monitor** tab uses the latest Yahoo Finance daily bars available to the app to show the recommended strategy from June 1 of the current year through the latest loaded date, compared with SPY. It is a research monitor, not broker-confirmed live execution P&L.
 
-The Stage A2 **Performance Diagnostics** tab is deliberately honest when ML underperforms SPY. It compares the recommended ML strategy against SPY buy-and-hold, equal-weight ETFs, 12-month momentum top 5, and dual momentum; reports ML ranking spread and prediction IC; separates gross and net performance; checks rank turnover, target choice, feature ablations, overfitting risk, and portfolio construction effects.
+The Stage A2 **Performance Diagnostics** tab is deliberately honest when ML underperforms SPY. It compares the recommended ML strategy against SPY buy-and-hold, equal-weight stocks, 12-month momentum Top 30, and dual momentum; reports ML ranking spread and prediction IC; separates gross and net performance; checks rank turnover, target choice, feature ablations, overfitting risk, and portfolio construction effects.
 
 XGBoost, LightGBM, SHAP, and hmmlearn are supported as optional engines. If those packages are not installed or are incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
 
@@ -83,7 +83,7 @@ Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 - Historical index membership is not point-in-time survivorship-bias-free.
 - Yahoo Finance and FRED data can have missing values, revisions, ticker gaps, and delayed updates.
 - A2 regime detection uses a true 3-state Gaussian HMM when `hmmlearn` is installed. Otherwise it is clearly labeled as a Gaussian-mixture regime proxy.
-- A2 HRP is labeled **HRP-style / risk-parity fallback** because it falls back to simpler risk-parity behavior when the clustering input is too sparse.
+- A2 inverse-vol / risk-parity style weighting is a simplified risk allocation method, not a full institutional HRP implementation.
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.
 - A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest, Gradient Boosting, optional XGBoost, and optional LightGBM remain available as heavier alternatives.
 - A2 includes risk controls: volatility targeting, optional regime exposure scaling, weight smoothing, and a daily-bar max drawdown guard. These are designed to reduce drawdown and turnover, not to guarantee a higher Sharpe ratio in every sample.
