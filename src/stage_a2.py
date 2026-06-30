@@ -1852,9 +1852,16 @@ def stage_a2_plain_english_diagnosis(bundle: dict, diagnostics: dict) -> list[st
         ml_return = metrics.loc[metrics["Series"].eq(recommended), "Total Return"].iloc[0]
         mom_return = benchmark_table.loc[benchmark_table["Strategy"].eq("12M Momentum Top 5"), "Total Return"].iloc[0]
         rows.append("Current ML model does not add value over the simple 12-month momentum benchmark." if ml_return < mom_return else "Current ML model adds value over the simple 12-month momentum benchmark in this sample.")
-    target = diagnostics["target_comparison"].sort_values("OOS Sharpe", ascending=False).head(1)
-    if not target.empty:
+    target_comparison = diagnostics.get("target_comparison", pd.DataFrame())
+    target = (
+        target_comparison.sort_values("OOS Sharpe", ascending=False).head(1)
+        if not target_comparison.empty and "OOS Sharpe" in target_comparison
+        else pd.DataFrame()
+    )
+    if not target.empty and "Target" in target:
         rows.append(f"Recommended next improvement: review target choice. Best diagnostic target by OOS Sharpe is '{target.iloc[0]['Target']}', but this is diagnostic only and was not used to retroactively optimize the final model.")
+    else:
+        rows.append("Recommended next improvement: run the target comparison diagnostic manually, then review whether target choice improves ranking spread without selecting on the final test set.")
     return rows
 
 
@@ -2153,7 +2160,7 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
         st.info("Target comparison is a heavier diagnostic. It is not used for final model selection and is run only when requested.")
         if st.button("Run Target Comparison Diagnostic"):
             target_comparison = run_stage_a2_target_diagnostic(bundle["close"], bundle["macro"], bundle["selected_model"], benchmark)
-    if not target_comparison.empty:
+    if not target_comparison.empty and "OOS Sharpe" in target_comparison:
         st.dataframe(
             target_comparison.style.format(
                 {
@@ -2168,6 +2175,9 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
             use_container_width=True,
             hide_index=True,
         )
+    elif not target_comparison.empty:
+        st.warning("Target comparison ran, but no valid OOS metric columns were produced for this sample.")
+        st.dataframe(target_comparison, use_container_width=True, hide_index=True)
 
     st.subheader("Feature Ablation")
     feature_ablation = diagnostics["feature_ablation"]
@@ -2180,7 +2190,7 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
                     for group in ["momentum only", "trend only", "volatility/drawdown only", "macro only", "momentum + trend", "all features"]
                 ]
             )
-    if not feature_ablation.empty:
+    if not feature_ablation.empty and "OOS Sharpe" in feature_ablation:
         st.dataframe(
             feature_ablation.style.format(
                 {
@@ -2196,6 +2206,9 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
             use_container_width=True,
             hide_index=True,
         )
+    elif not feature_ablation.empty:
+        st.warning("Feature ablation ran, but no valid OOS metric columns were produced for this sample.")
+        st.dataframe(feature_ablation, use_container_width=True, hide_index=True)
 
     st.subheader("Portfolio Construction Diagnosis")
     portfolio_comparison = bundle["portfolio_comparison"].copy()
