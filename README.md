@@ -40,8 +40,6 @@ Stage A2 ranks assets each month with a white-box ML model, then passes the rank
 
 XGBoost, LightGBM, SHAP, and hmmlearn are supported as optional engines. If those packages are not installed or are incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
 
-Stage A2 is preset-driven in the live dashboard. The current recommended preset uses LightGBM when available, next-month cross-sectional rank percentile as the target, a 10-year research window, 12bps fixed cost, 6bps square-root impact, 10% target volatility, 15% drawdown guard, 60% monthly turnover cap, and a 4% rebalance threshold. The point is to present one reproducible research pipeline instead of asking the viewer to tune the strategy from the sidebar.
-
 Stage A2 feature groups include:
 
 - Momentum and relative strength: 1M/3M/6M/12M returns, returns relative to SPY, cross-sectional momentum rank.

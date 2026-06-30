@@ -19,23 +19,6 @@ TARGET_TYPES = [
     "Next-month cross-sectional rank percentile",
 ]
 STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
-STAGE_A2_PRESET = {
-    "Preset": "Codex Recommended A2 White-Box Ranking",
-    "Research Window Years": 10,
-    "Max Stock Names": 50,
-    "Model": "LightGBM",
-    "Target": "Next-month cross-sectional rank percentile",
-    "Walk-Forward Hyperparameter Tuning": False,
-    "Transaction Cost Bps": 12,
-    "Square-Root Impact Bps": 6,
-    "Fractional Kelly": 0.25,
-    "Target Volatility": 0.10,
-    "Weight Smoothing": 0.35,
-    "Regime Risk Overlay": True,
-    "Max Drawdown Guard": 0.15,
-    "Monthly Turnover Cap": 0.60,
-    "Rebalance Threshold": 0.04,
-}
 DEFAULT_A2_STOCKS = [
     "AAPL",
     "MSFT",
@@ -415,11 +398,10 @@ def build_walk_forward_ml_predictions(
                 "Train IC": train_ic,
             }
         )
-        if len(log_rows) % 3 == 0:
-            importance = extract_feature_importance(model, x.columns, x.loc[predict_mask], target_type)
-            if not importance.empty:
-                importance["Signal Date"] = signal_date
-                importance_rows.append(importance)
+        importance = extract_feature_importance(model, x.columns, x.loc[predict_mask], target_type)
+        if not importance.empty:
+            importance["Signal Date"] = signal_date
+            importance_rows.append(importance)
 
     if not predictions:
         return pd.Series(dtype=float, name="score"), pd.DataFrame(log_rows), pd.DataFrame()
@@ -1317,28 +1299,23 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     local_stocks = universe_table["Ticker"].dropna().astype(str).str.upper().head(80).tolist() if "Ticker" in universe_table else DEFAULT_A2_STOCKS
     default_symbols = tuple(dict.fromkeys([*local_stocks, *SECTOR_ETFS, *GLOBAL_PROXIES]))
 
-    years = int(STAGE_A2_PRESET["Research Window Years"])
-    max_names = min(int(STAGE_A2_PRESET["Max Stock Names"]), len(default_symbols))
-    model_name = str(STAGE_A2_PRESET["Model"])
-    base_cost_bps = float(STAGE_A2_PRESET["Transaction Cost Bps"])
-    impact_bps = float(STAGE_A2_PRESET["Square-Root Impact Bps"])
-    kelly_fraction = float(STAGE_A2_PRESET["Fractional Kelly"])
-    target_volatility = float(STAGE_A2_PRESET["Target Volatility"])
-    smoothing = float(STAGE_A2_PRESET["Weight Smoothing"])
-    enable_regime_overlay = bool(STAGE_A2_PRESET["Regime Risk Overlay"])
-    max_drawdown_limit = float(STAGE_A2_PRESET["Max Drawdown Guard"])
-    turnover_cap = float(STAGE_A2_PRESET["Monthly Turnover Cap"])
-    rebalance_threshold = float(STAGE_A2_PRESET["Rebalance Threshold"])
-    target_type = str(STAGE_A2_PRESET["Target"])
-    enable_tuning = bool(STAGE_A2_PRESET["Walk-Forward Hyperparameter Tuning"])
-
-    st.caption("Stage A2 is preset-driven: parameters are fixed in code so the dashboard presents one reproducible research pipeline.")
-    preset_rows = [
-        {"Setting": key, "Value": value if not isinstance(value, float) else f"{value:.2%}" if value < 1 else f"{value:g}"}
-        for key, value in STAGE_A2_PRESET.items()
-    ]
-    preset_rows.insert(1, {"Setting": "Initial Capital", "Value": f"${STAGE_A2_INITIAL_CAPITAL:,.0f}"})
-    st.dataframe(pd.DataFrame(preset_rows), use_container_width=True, hide_index=True)
+    with st.sidebar:
+        st.header("Stage A2 Controls")
+        st.metric("Initial Capital", f"${STAGE_A2_INITIAL_CAPITAL:,.0f}")
+        years = st.slider("A2 research window", min_value=5, max_value=15, value=10, step=1)
+        max_names = st.slider("A2 max stock names", min_value=20, max_value=min(120, len(default_symbols)), value=min(40, len(default_symbols)), step=10)
+        model_name = st.selectbox("White-box ML model", STAGE_A2_MODEL_OPTIONS, index=4)
+        base_cost_bps = st.slider("Txn cost bps", min_value=10, max_value=20, value=12, step=1)
+        impact_bps = st.slider("Square-root impact bps", min_value=1, max_value=20, value=6, step=1)
+        kelly_fraction = st.slider("Fractional Kelly", min_value=0.25, max_value=0.50, value=0.25, step=0.05)
+        target_volatility = st.slider("Target volatility", min_value=0.06, max_value=0.20, value=0.12, step=0.01)
+        smoothing = st.slider("Weight smoothing", min_value=0.00, max_value=0.80, value=0.25, step=0.05)
+        enable_regime_overlay = st.toggle("Regime risk overlay", value=False)
+        max_drawdown_limit = st.slider("Max drawdown guard", min_value=0.05, max_value=0.25, value=0.15, step=0.01)
+        turnover_cap = st.slider("Monthly turnover cap", min_value=0.25, max_value=2.00, value=0.75, step=0.05)
+        rebalance_threshold = st.slider("Rebalance threshold", min_value=0.00, max_value=0.25, value=0.03, step=0.01)
+        target_type = st.selectbox("Prediction target", TARGET_TYPES, index=0)
+        enable_tuning = st.toggle("Walk-forward hyperparameter tuning", value=False)
 
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=years)
