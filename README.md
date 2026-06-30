@@ -8,9 +8,9 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 ## Features
 
-- Run Stage A2 white-box ML models: Decision Tree, Random Forest, Gradient Boosting, and Elastic Net
+- Run Stage A2 white-box ML models: Decision Tree, Random Forest, Gradient Boosting, optional XGBoost/LightGBM, and Elastic Net
 - Build HRP-style / risk-parity fallback, Ledoit-Wolf mean-variance, fractional Kelly, and beta-neutral ML portfolios
-- Visualize rule-based regime proxy states, factor exposure heatmaps, stress tests, execution costs, and feature importance drift
+- Visualize rule-based regime proxy states, factor exposure heatmaps, stress tests, execution costs, and SHAP/native feature importance drift
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
 - Build 12-1 momentum, low-volatility, beta, drawdown, and trend features
 - Evaluate 60/20/20 train/validation/test splits and combinatorial purged CV
@@ -30,13 +30,15 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 **Stage A1** is the linear benchmark lab. It builds transparent price-based features, trains OLS/Ridge/LASSO/Elastic Net models, and runs true walk-forward portfolio tests. The goal is to create a simple baseline that later ML systems must beat.
 
-**Stage A2** is the white-box ML lab. It adds tree models, feature importance tracking, macro fields from FRED when available, global ETF proxies, HRP-style allocation, Ledoit-Wolf shrinkage, fractional Kelly, beta-neutral long/short, factor exposure checks, stress tests, and execution-cost estimates.
+**Stage A2** is the white-box ML lab. It adds tree models, optional XGBoost/LightGBM engines, SHAP/native feature importance tracking, macro fields from FRED when available, global ETF proxies, HRP-style allocation, Ledoit-Wolf shrinkage, fractional Kelly, beta-neutral long/short, factor exposure checks, stress tests, and execution-cost estimates.
 
 Both labs use walk-forward logic: each prediction month trains only on data before that month, then trades the following period. Dashboard performance is intended for research and education, not live investment advice.
 
 ## Stage A2 ML Ranking Pipeline
 
 Stage A2 ranks assets each month with a white-box ML model, then passes the ranking scores into the existing HRP-style, Ledoit-Wolf, fractional Kelly, and beta-neutral portfolios. It does not use random K-fold validation. The optional hyperparameter tuner uses time-series-aware walk-forward validation only.
+
+XGBoost, LightGBM, SHAP, and hmmlearn are supported as optional engines. If those packages are not installed or are incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
 
 Stage A2 feature groups include:
 
@@ -67,10 +69,10 @@ Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 
 - Historical index membership is not point-in-time survivorship-bias-free.
 - Yahoo Finance and FRED data can have missing values, revisions, ticker gaps, and delayed updates.
-- A2 regime detection is a **rule-based / Gaussian-mixture regime proxy**, not a true Hidden Markov Model.
+- A2 regime detection uses a true 3-state Gaussian HMM when `hmmlearn` is installed. Otherwise it is clearly labeled as a Gaussian-mixture regime proxy.
 - A2 HRP is labeled **HRP-style / risk-parity fallback** because it falls back to simpler risk-parity behavior when the clustering input is too sparse.
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.
-- A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest and Gradient Boosting remain available as heavier alternatives.
+- A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest, Gradient Boosting, optional XGBoost, and optional LightGBM remain available as heavier alternatives.
 - A2 includes risk controls: volatility targeting, optional regime exposure scaling, weight smoothing, and a daily-bar max drawdown guard. These are designed to reduce drawdown and turnover, not to guarantee a higher Sharpe ratio in every sample.
 - A1 and A2 headline performance is net of estimated costs. A2 also shows gross-vs-net attribution in the ML diagnostics tab.
 - Stress windows show "Not enough data" when the selected history does not overlap 2008, 2020, or 2022.
@@ -91,6 +93,12 @@ Install dependencies:
 
 ```bash
 pip install -r requirements.txt
+```
+
+Optional Stage A2 engines:
+
+```bash
+pip install xgboost lightgbm shap hmmlearn
 ```
 
 ## Run

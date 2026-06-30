@@ -18,6 +18,7 @@ TARGET_TYPES = [
     "Next-month outperform SPY classification",
     "Next-month cross-sectional rank percentile",
 ]
+STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
 DEFAULT_A2_STOCKS = [
     "AAPL",
     "MSFT",
@@ -226,7 +227,7 @@ def build_stage_a2_features(
 
 
 def create_stage_a2_model(model_name: str, params: dict | None = None, target_type: str = "Next-month raw return"):
-    from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
+    from sklearn.ensemble import GradientBoostingClassifier, GradientBoostingRegressor, HistGradientBoostingClassifier, HistGradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
     from sklearn.linear_model import ElasticNet
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
@@ -257,6 +258,66 @@ def create_stage_a2_model(model_name: str, params: dict | None = None, target_ty
             subsample=params.get("subsample", 1.0),
             random_state=11,
         )
+    if model_name == "XGBoost":
+        try:
+            from xgboost import XGBClassifier, XGBRegressor
+
+            model_class = XGBClassifier if is_classification else XGBRegressor
+            objective = "binary:logistic" if is_classification else "reg:squarederror"
+            model = model_class(
+                n_estimators=params.get("n_estimators", 100),
+                learning_rate=params.get("learning_rate", 0.03),
+                max_depth=params.get("max_depth", 3),
+                min_child_weight=params.get("min_samples_leaf", 10),
+                subsample=params.get("subsample", 0.9),
+                colsample_bytree=params.get("max_features_ratio", 0.8),
+                objective=objective,
+                random_state=11,
+                n_jobs=-1,
+                verbosity=0,
+            )
+            model._stage_a2_engine = "XGBoost"
+            return model
+        except Exception:
+            model_class = HistGradientBoostingClassifier if is_classification else HistGradientBoostingRegressor
+            model = model_class(
+                max_iter=params.get("n_estimators", 100),
+                learning_rate=params.get("learning_rate", 0.03),
+                max_leaf_nodes=15,
+                l2_regularization=0.01,
+                random_state=11,
+            )
+            model._stage_a2_engine = "XGBoost unavailable; sklearn HistGradientBoosting fallback"
+            return model
+    if model_name == "LightGBM":
+        try:
+            from lightgbm import LGBMClassifier, LGBMRegressor
+
+            model_class = LGBMClassifier if is_classification else LGBMRegressor
+            model = model_class(
+                n_estimators=params.get("n_estimators", 100),
+                learning_rate=params.get("learning_rate", 0.03),
+                max_depth=params.get("max_depth", 3),
+                min_child_samples=params.get("min_samples_leaf", 10),
+                subsample=params.get("subsample", 0.9),
+                colsample_bytree=params.get("max_features_ratio", 0.8),
+                random_state=11,
+                n_jobs=-1,
+                verbose=-1,
+            )
+            model._stage_a2_engine = "LightGBM"
+            return model
+        except Exception:
+            model_class = HistGradientBoostingClassifier if is_classification else HistGradientBoostingRegressor
+            model = model_class(
+                max_iter=params.get("n_estimators", 100),
+                learning_rate=params.get("learning_rate", 0.03),
+                max_leaf_nodes=15,
+                l2_regularization=0.01,
+                random_state=11,
+            )
+            model._stage_a2_engine = "LightGBM unavailable; sklearn HistGradientBoosting fallback"
+            return model
     if model_name == "Elastic Net":
         if is_classification:
             from sklearn.linear_model import LogisticRegression
@@ -281,6 +342,11 @@ def predict_stage_a2_model(model, x: pd.DataFrame, target_type: str) -> np.ndarr
         probabilities = model.predict_proba(x)
         return probabilities[:, -1]
     return model.predict(x)
+
+
+def describe_model_engine(model) -> str:
+    estimator = model[-1] if hasattr(model, "steps") else model
+    return getattr(estimator, "_stage_a2_engine", estimator.__class__.__name__)
 
 
 def build_walk_forward_ml_predictions(
@@ -326,12 +392,13 @@ def build_walk_forward_ml_predictions(
                 "Train Samples": int(train_mask.sum()),
                 "Predicted Assets": int(predict_mask.sum()),
                 "Model": model_name,
+                "Model Engine": describe_model_engine(model),
                 "Model Params": str(model_params or {}),
                 "Prediction Source": "ML",
                 "Train IC": train_ic,
             }
         )
-        importance = extract_feature_importance(model, x.columns)
+        importance = extract_feature_importance(model, x.columns, x.loc[predict_mask], target_type)
         if not importance.empty:
             importance["Signal Date"] = signal_date
             importance_rows.append(importance)
@@ -407,6 +474,23 @@ def get_stage_a2_param_grid(model_name: str) -> list[dict]:
             for lr in [0.01, 0.03, 0.05]
             for depth in [2, 3]
             for subsample in [0.7, 0.9, 1.0]
+        ]
+    if model_name in ["XGBoost", "LightGBM"]:
+        return [
+            {
+                "n_estimators": n,
+                "learning_rate": lr,
+                "max_depth": depth,
+                "min_samples_leaf": leaf,
+                "subsample": subsample,
+                "max_features_ratio": max_features_ratio,
+            }
+            for n in [50, 100, 200]
+            for lr in [0.01, 0.03, 0.05]
+            for depth in [2, 3]
+            for leaf in [5, 10, 20]
+            for subsample in [0.7, 0.9]
+            for max_features_ratio in [0.7, 0.9]
         ]
     return [{}]
 
@@ -567,15 +651,56 @@ def build_classification_diagnostics(predictions: pd.Series, y: pd.Series, forwa
     )
 
 
-def extract_feature_importance(model, feature_names: pd.Index) -> pd.DataFrame:
+def extract_feature_importance(
+    model,
+    feature_names: pd.Index,
+    sample_x: pd.DataFrame | None = None,
+    target_type: str = "Next-month raw return",
+) -> pd.DataFrame:
     estimator = model[-1] if hasattr(model, "steps") else model
+    if sample_x is not None and hasattr(estimator, "predict"):
+        try:
+            import shap
+
+            shap_sample = sample_x.tail(min(40, len(sample_x)))
+            explainer = shap.Explainer(estimator, shap_sample)
+            shap_values = explainer(shap_sample)
+            values = np.asarray(shap_values.values)
+            if values.ndim == 3:
+                values = values[:, :, -1]
+            values = np.abs(values).mean(axis=0)
+            importance = pd.DataFrame({"Feature": feature_names, "Importance": values, "Importance Type": "SHAP mean absolute value"})
+            total = importance["Importance"].abs().sum()
+            if total > 0:
+                importance["Importance"] = importance["Importance"].abs() / total
+            return importance.sort_values("Importance", ascending=False).head(20)
+        except Exception:
+            pass
     if hasattr(estimator, "feature_importances_"):
         values = estimator.feature_importances_
     elif hasattr(estimator, "coef_"):
         values = np.abs(estimator.coef_)
     else:
-        return pd.DataFrame()
-    importance = pd.DataFrame({"Feature": feature_names, "Importance": values})
+        if sample_x is None or sample_x.empty:
+            return pd.DataFrame()
+        try:
+            baseline = np.asarray(predict_stage_a2_model(model, sample_x, target_type))
+            sensitivity_values = []
+            for feature in feature_names:
+                shocked = sample_x.copy()
+                shocked[feature] = shocked[feature].median()
+                shocked_prediction = np.asarray(predict_stage_a2_model(model, shocked, target_type))
+                sensitivity_values.append(np.nanmean(np.abs(baseline - shocked_prediction)))
+            values = np.asarray(sensitivity_values)
+            importance = pd.DataFrame({"Feature": feature_names, "Importance": values, "Importance Type": "Prediction sensitivity fallback"})
+            total = importance["Importance"].abs().sum()
+            if total > 0:
+                importance["Importance"] = importance["Importance"].abs() / total
+            return importance.sort_values("Importance", ascending=False).head(20)
+        except Exception:
+            return pd.DataFrame()
+    values = np.asarray(values).reshape(-1)
+    importance = pd.DataFrame({"Feature": feature_names, "Importance": values, "Importance Type": "Native model importance"})
     total = importance["Importance"].abs().sum()
     if total > 0:
         importance["Importance"] = importance["Importance"].abs() / total
@@ -891,8 +1016,6 @@ def build_stage_a2_portfolios(
 
 
 def detect_regime_states(close: pd.DataFrame, benchmark: str = "SPY") -> pd.DataFrame:
-    from sklearn.mixture import GaussianMixture
-
     if benchmark not in close:
         return pd.DataFrame()
     monthly = close[benchmark].resample("ME").last()
@@ -906,8 +1029,18 @@ def detect_regime_states(close: pd.DataFrame, benchmark: str = "SPY") -> pd.Data
     ).dropna()
     if len(features) < 18:
         return pd.DataFrame()
-    model = GaussianMixture(n_components=3, covariance_type="full", random_state=7)
-    labels = model.fit_predict(features)
+    method = "HMM"
+    try:
+        from hmmlearn.hmm import GaussianHMM
+
+        model = GaussianHMM(n_components=3, covariance_type="full", n_iter=300, random_state=7)
+        labels = model.fit_predict(features)
+    except Exception:
+        from sklearn.mixture import GaussianMixture
+
+        model = GaussianMixture(n_components=3, covariance_type="full", random_state=7)
+        labels = model.fit_predict(features)
+        method = "HMM unavailable; Gaussian-mixture regime proxy"
     state_returns = pd.Series(labels, index=features.index).to_frame("State").join(features).groupby("State")["return_1m"].mean()
     ordered = state_returns.sort_values().index.tolist()
     names = {ordered[0]: "Bear", ordered[1]: "Recovery", ordered[2]: "Bull"}
@@ -915,6 +1048,7 @@ def detect_regime_states(close: pd.DataFrame, benchmark: str = "SPY") -> pd.Data
     result["State Id"] = labels
     result["Regime"] = [names[label] for label in labels]
     result["Regime Code"] = result["Regime"].map({"Bear": 0, "Recovery": 1, "Bull": 2})
+    result["Regime Method"] = method
     return result
 
 
@@ -1045,7 +1179,7 @@ def run_stage_a2_research(
     }
     selected_params = {}
     tuning_results = pd.DataFrame()
-    if enable_tuning and model_name in ["Elastic Net", "Random Forest", "Gradient Boosting"] and not x.empty:
+    if enable_tuning and model_name in ["Elastic Net", "Random Forest", "Gradient Boosting", "XGBoost", "LightGBM"] and not x.empty:
         selected_params, tuning_results = tune_stage_a2_hyperparameters(x, y, forward_returns, model_name, target_type)
     predictions = pd.Series(dtype=float, name="score")
     walk_log = pd.DataFrame()
@@ -1170,7 +1304,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
         st.metric("Initial Capital", f"${STAGE_A2_INITIAL_CAPITAL:,.0f}")
         years = st.slider("A2 research window", min_value=5, max_value=15, value=10, step=1)
         max_names = st.slider("A2 max stock names", min_value=20, max_value=min(120, len(default_symbols)), value=min(40, len(default_symbols)), step=10)
-        model_name = st.selectbox("White-box ML model", ["Random Forest", "Gradient Boosting", "Decision Tree", "Elastic Net"], index=2)
+        model_name = st.selectbox("White-box ML model", STAGE_A2_MODEL_OPTIONS, index=4)
         base_cost_bps = st.slider("Txn cost bps", min_value=10, max_value=20, value=12, step=1)
         impact_bps = st.slider("Square-root impact bps", min_value=1, max_value=20, value=6, step=1)
         kelly_fraction = st.slider("Fractional Kelly", min_value=0.25, max_value=0.50, value=0.25, step=0.05)
@@ -1393,6 +1527,9 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             )
         st.subheader("Prediction Source and Fallback")
         st.write(f"Prediction source: **{diagnostics.get('Prediction Source', 'ML')}**")
+        if not walk_log.empty and "Model Engine" in walk_log:
+            engine_summary = walk_log["Model Engine"].value_counts().rename_axis("Model Engine").reset_index(name="Months")
+            st.dataframe(engine_summary, use_container_width=True, hide_index=True)
         fallback_count = int((walk_log["Prediction Source"] == "Fallback").sum()) if not walk_log.empty and "Prediction Source" in walk_log else 0
         st.metric("Fallback Months", fallback_count)
         if not walk_log.empty and "Train IC" in walk_log and not signal_summary.empty:
@@ -1423,10 +1560,13 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             st.dataframe(stability.sort_values("mean", ascending=False).head(20).style.format({"mean": "{:.3f}", "std": "{:.3f}", "Stability Ratio": "{:.2f}"}), use_container_width=True, hide_index=True)
 
     with model_tab:
-        st.subheader("Feature Importance Tracking")
+        st.subheader("SHAP / Feature Importance Tracking")
         if importance_history.empty:
             st.info("Feature importance is unavailable for the selected model.")
         else:
+            if "Importance Type" in importance_history:
+                st.caption("When `shap` is installed and compatible with the selected estimator, importance uses mean absolute SHAP values. Otherwise it falls back to native model importance or absolute linear coefficients.")
+                st.dataframe(importance_history["Importance Type"].value_counts().rename_axis("Importance Type").reset_index(name="Rows"), use_container_width=True, hide_index=True)
             latest_importance = importance_history.sort_values("Signal Date").groupby("Feature")["Importance"].tail(1)
             latest_importance = importance_history.loc[latest_importance.index].sort_values("Importance", ascending=False).head(15)
             st.plotly_chart(px.bar(latest_importance, x="Importance", y="Feature", orientation="h", title=f"{model_name} Latest Feature Importance"), use_container_width=True)
@@ -1443,6 +1583,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             "Predicted Assets",
             "Model",
             "Prediction Source",
+            "Model Engine",
         ]
         st.dataframe(walk_log[[column for column in debug_columns if column in walk_log.columns]].tail(36), use_container_width=True, hide_index=True)
         fallback_months = walk_log[walk_log.get("Prediction Source", pd.Series(dtype=str)).eq("Fallback")] if not walk_log.empty and "Prediction Source" in walk_log else pd.DataFrame()
@@ -1453,14 +1594,16 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
             st.dataframe(fallback_months, use_container_width=True, hide_index=True)
 
     with regime_tab:
-        st.subheader("Rule-Based Regime Proxy Visualization")
-        st.write(
-            "This is not a true Hidden Markov Model. It uses a Gaussian-mixture clustering proxy on monthly SPY return, volatility, "
-            "and drawdown, then labels states as Bear, Recovery, or Bull by average return."
-        )
         if regimes.empty:
             st.warning("Not enough data for regime state detection.")
         else:
+            regime_method = regimes["Regime Method"].iloc[-1] if "Regime Method" in regimes else "Unknown"
+            st.subheader("HMM / Regime State Visualization")
+            if regime_method == "HMM":
+                st.write("Regime states use a 3-state Gaussian Hidden Markov Model on monthly SPY return, volatility, and drawdown, then label states as Bear, Recovery, or Bull by average return.")
+            else:
+                st.write("A true HMM engine is not available in this runtime, so Stage A2 is using the clearly labeled Gaussian-mixture regime proxy.")
+            st.metric("Regime Engine", regime_method)
             regime_chart = regimes.reset_index()
             regime_chart = regime_chart.rename(columns={regime_chart.columns[0]: "Date"})
             regime_chart["vol_6m"] = regime_chart["vol_6m"].abs().fillna(0.0).clip(lower=0.001)
