@@ -19,12 +19,11 @@ TARGET_TYPES = [
     "Next-month cross-sectional rank percentile",
 ]
 STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
-STAGE_A2_PRESENTATION_MODELS = ["Elastic Net", "Decision Tree", "Random Forest"]
+STAGE_A2_PRESENTATION_MODELS = STAGE_A2_MODEL_OPTIONS
 STAGE_A2_PRESENTATION_CONFIG = {
     "Initial Capital": STAGE_A2_INITIAL_CAPITAL,
     "Rebalance Frequency": "Monthly",
     "Transaction Cost Bps": 10.0,
-    "Square-Root Impact Bps": 6.0,
     "Candidate Stock Holdings": [30, 40, 50],
     "Default Stock Holdings": 30,
     "Max Stock Weight": MAX_LONG_ONLY_WEIGHT,
@@ -879,10 +878,10 @@ def beta_neutral_weights(returns: pd.DataFrame, scores: pd.Series, benchmark: st
     return weights
 
 
-def apply_square_root_market_impact(weights: pd.Series, previous: pd.Series, base_bps: float, impact_bps: float) -> float:
+def calculate_transaction_cost(weights: pd.Series, previous: pd.Series, base_bps: float) -> float:
     trade_size = (weights - previous.reindex(weights.index).fillna(0.0)).abs()
     turnover = trade_size.sum()
-    return turnover * base_bps / 10000 + np.sqrt(trade_size.clip(lower=0)).sum() * impact_bps / 10000
+    return turnover * base_bps / 10000
 
 
 def classify_risk_overlay_state(lookback: pd.DataFrame, benchmark: str = "SPY") -> tuple[str, float]:
@@ -943,7 +942,6 @@ def build_stage_a2_portfolios(
     close: pd.DataFrame,
     predictions: pd.Series,
     base_cost_bps: float,
-    impact_bps: float,
     kelly_fraction: float,
     target_volatility: float,
     smoothing: float,
@@ -1019,7 +1017,7 @@ def build_stage_a2_portfolios(
                 rebalance_skipped = True
             elif requested_turnover > turnover_cap:
                 weights = previous + (weights - previous) * (turnover_cap / requested_turnover)
-            cost = apply_square_root_market_impact(weights, previous_weights[strategy_name], base_cost_bps, impact_bps)
+            cost = calculate_transaction_cost(weights, previous_weights[strategy_name], base_cost_bps)
             raw_period_returns = daily_returns.loc[period_mask, weights.index].dot(weights)
             period_returns = raw_period_returns.copy()
             drawdown_guard_triggered = False
@@ -1053,7 +1051,7 @@ def build_stage_a2_portfolios(
                     "Requested Turnover": requested_turnover,
                     "Turnover Cap": turnover_cap,
                     "Rebalance Skipped": "Yes" if rebalance_skipped else "No",
-                    "Market Impact Cost": cost,
+                    "Transaction Cost": cost,
                     "Gross Exposure": weights.abs().sum(),
                     "Net Exposure": weights.sum(),
                     "Max Position Weight": weights.max(),
@@ -1226,7 +1224,6 @@ def run_stage_a2_research(
     macro: pd.DataFrame,
     model_name: str,
     base_cost_bps: float,
-    impact_bps: float,
     kelly_fraction: float,
     target_volatility: float,
     smoothing: float,
@@ -1305,7 +1302,6 @@ def run_stage_a2_research(
         close,
         predictions,
         base_cost_bps,
-        impact_bps,
         kelly_fraction,
         target_volatility,
         smoothing,
@@ -1437,7 +1433,7 @@ def recommend_stage_a2_portfolio_method(
     if not execution.empty:
         exec_summary = execution.groupby("Portfolio", as_index=False).agg(
             Average_Turnover=("Turnover", "mean"),
-            Average_Cost=("Market Impact Cost", "mean"),
+            Average_Cost=("Transaction Cost", "mean"),
             Max_Position_Weight=("Max Position Weight", "max"),
         ).rename(columns={"Portfolio": "Portfolio Method"})
         comparison = comparison.merge(exec_summary, on="Portfolio Method", how="left")
@@ -1467,7 +1463,6 @@ def select_stage_a2_holding_count(
             close,
             base_result[1],
             config["Transaction Cost Bps"],
-            config["Square-Root Impact Bps"],
             0.25,
             config["Target Volatility"],
             config["Weight Smoothing"],
@@ -1750,7 +1745,7 @@ def backtest_ml_equal_weight_top_n(
             period.iloc[0] -= cost
         gross.loc[period_mask] = raw
         net.loc[period_mask] = period
-        rows.append({"Date": signal_date, "Portfolio": f"Equal-Weight ML Top {top_n}", "Turnover": (weights - previous).abs().sum(), "Market Impact Cost": cost})
+        rows.append({"Date": signal_date, "Portfolio": f"Equal-Weight ML Top {top_n}", "Turnover": (weights - previous).abs().sum(), "Transaction Cost": cost})
         previous = weights
     return net, gross, pd.DataFrame(rows)
 
@@ -1799,7 +1794,6 @@ def run_stage_a2_feature_subset_diagnostic(
         close,
         predictions,
         config["Transaction Cost Bps"],
-        config["Square-Root Impact Bps"],
         0.25,
         config["Target Volatility"],
         0.0,
@@ -1835,7 +1829,6 @@ def run_stage_a2_target_diagnostic(close: pd.DataFrame, macro: pd.DataFrame, mod
             macro,
             model_name,
             config["Transaction Cost Bps"],
-            config["Square-Root Impact Bps"],
             0.25,
             config["Target Volatility"],
             0.0,
@@ -2004,7 +1997,6 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame,
             macro,
             model_name,
             config["Transaction Cost Bps"],
-            config["Square-Root Impact Bps"],
             0.25,
             config["Target Volatility"],
             config["Weight Smoothing"],
@@ -2239,7 +2231,7 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
     if not execution.empty:
         method_execution = execution[execution["Portfolio"].eq(recommended)].copy()
         st.metric("Average Monthly Turnover", f"{method_execution['Turnover'].mean():.2f}x")
-        st.metric("Total Cost Drag Estimate", f"{method_execution['Market Impact Cost'].sum():.2%}")
+        st.metric("Total Transaction Cost Estimate", f"{method_execution['Transaction Cost'].sum():.2%}")
         st.plotly_chart(px.line(method_execution, x="Date", y="Turnover", title="Monthly Turnover"), use_container_width=True, key="a2_diag_turnover")
         st.dataframe(method_execution.sort_values("Turnover", ascending=False).head(10), use_container_width=True, hide_index=True)
 
@@ -2460,7 +2452,7 @@ def render_stage_a2_portfolio_comparison(bundle: dict) -> None:
     drawdown = drawdown / drawdown.cummax() - 1
     st.plotly_chart(px.line(drawdown, title="Portfolio Method Drawdown Comparison"), use_container_width=True, key="a2_portfolio_drawdown_compare")
     if not result[6].empty:
-        cost_turnover = result[6].groupby("Portfolio", as_index=False).agg(Turnover=("Turnover", "mean"), Cost_Drag=("Market Impact Cost", "sum"))
+        cost_turnover = result[6].groupby("Portfolio", as_index=False).agg(Turnover=("Turnover", "mean"), Cost_Drag=("Transaction Cost", "sum"))
         st.plotly_chart(px.bar(cost_turnover, x="Portfolio", y=["Turnover", "Cost_Drag"], barmode="group", title="Turnover and Cost Drag"), use_container_width=True, key="a2_portfolio_cost_turnover")
 
 
@@ -2517,7 +2509,7 @@ def render_stage_a2_risk_dashboard(bundle: dict) -> None:
     if not execution.empty and execution["Max Position Weight"].max() > MAX_LONG_ONLY_WEIGHT:
         st.warning("Concentration warning: at least one historical rebalance exceeded the max stock weight guideline.")
     if not execution.empty:
-        st.metric("Total Transaction Cost Drag Estimate", f"{execution.loc[execution['Portfolio'].eq(recommended), 'Market Impact Cost'].sum():.2%}")
+        st.metric("Total Transaction Cost Estimate", f"{execution.loc[execution['Portfolio'].eq(recommended), 'Transaction Cost'].sum():.2%}")
 
 
 def render_stage_a2_stress_tests(bundle: dict) -> None:

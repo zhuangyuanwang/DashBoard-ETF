@@ -22,7 +22,7 @@ The primary target is next-month excess return versus SPY. This focuses the mode
 
 ## 6. Model Framework
 
-The default fast model ladder includes Elastic Net, Decision Tree, and Random Forest. Heavier engines such as Gradient Boosting, XGBoost, LightGBM, and full SHAP are supported as future or advanced research extensions but are not run by default on Streamlit Cloud.
+The default model ladder runs the full supported model set: Elastic Net, Decision Tree, Random Forest, Gradient Boosting, optional XGBoost, and optional LightGBM. Optional engines fall back to sklearn histogram gradient boosting if unavailable.
 
 ## 7. Walk-Forward Validation
 
@@ -38,7 +38,7 @@ Risk monitoring includes single-name concentration, sector exposure, beta to SPY
 
 ## 10. Execution Cost Assumptions
 
-The backtest applies fixed transaction costs and a simplified square-root market-impact estimate based on monthly turnover. Results are shown gross and net where available.
+The backtest applies fixed transaction costs based on monthly turnover. Results are shown gross and net where available.
 
 ## 11. Results
 

@@ -40,7 +40,7 @@ Stage A2 ranks stocks each month by predicted next-month excess return versus SP
 
 The dashboard automatically:
 
-- Runs the default fast model set: Elastic Net, Decision Tree, and Random Forest. Heavier engines such as Gradient Boosting, XGBoost, and LightGBM remain supported in code but are not run by default on Streamlit Cloud.
+- Runs the full supported model set by default: Random Forest, Gradient Boosting, optional XGBoost, optional LightGBM, Decision Tree, and Elastic Net. Optional engines fall back to sklearn histogram gradient boosting if unavailable.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Selects the number of stocks to hold from 30, 40, or 50 using walk-forward OOS diagnostics.
 - Compares Equal Weight Top N, Score Weighted Top N, Inverse-Vol / Risk-Parity Style Top N, and Beta-Neutral Long/Short.
@@ -75,7 +75,7 @@ Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 - Monthly returns are noisy and hard to predict.
 - The default universe can still be sector-concentrated depending on `stock_universe.csv`.
 - Strict walk-forward validation removes look-ahead benefits that weaker backtests sometimes contain.
-- Transaction costs, square-root impact, turnover controls, and drawdown guards reduce upside.
+- Fixed transaction costs, turnover controls, and drawdown guards reduce upside.
 - ML ranking alpha may be weaker than simple trend/beta exposure in strong bull markets.
 
 ## Limitations and Fallbacks
