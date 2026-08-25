@@ -19,7 +19,7 @@ TARGET_TYPES = [
     "Next-month cross-sectional rank percentile",
 ]
 STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
-STAGE_A2_PRESENTATION_MODELS = STAGE_A2_MODEL_OPTIONS
+STAGE_A2_PRESENTATION_MODELS = ["Elastic Net", "Random Forest", "XGBoost"]
 STAGE_A2_PRESENTATION_CONFIG = {
     "Initial Capital": STAGE_A2_INITIAL_CAPITAL,
     "Rebalance Frequency": "Monthly",

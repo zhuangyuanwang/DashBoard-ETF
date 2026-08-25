@@ -6,3 +6,4 @@ plotly
 pyarrow
 scikit-learn
 scipy
+xgboost

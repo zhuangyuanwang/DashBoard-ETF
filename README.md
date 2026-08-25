@@ -40,7 +40,7 @@ Stage A2 ranks stocks each month by predicted next-month excess return versus SP
 
 The dashboard automatically:
 
-- Runs the full supported model set by default: Random Forest, Gradient Boosting, optional XGBoost, optional LightGBM, Decision Tree, and Elastic Net. Optional engines fall back to sklearn histogram gradient boosting if unavailable.
+- Runs a balanced default model set: Elastic Net, Random Forest, and XGBoost. Gradient Boosting, LightGBM, and Decision Tree remain supported in code for heavier offline comparisons.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Selects the number of stocks to hold from 30, 40, or 50 using walk-forward OOS diagnostics.
 - Compares Equal Weight Top N, Score Weighted Top N, Inverse-Vol / Risk-Parity Style Top N, and Beta-Neutral Long/Short.
@@ -51,7 +51,7 @@ The Stage A2 **Live Monitor** tab uses the latest Yahoo Finance daily bars avail
 
 The Stage A2 **Performance Diagnostics** tab is deliberately honest when ML underperforms SPY. It compares the recommended ML strategy against SPY buy-and-hold, equal-weight stocks, 12-month momentum Top 30, and dual momentum; reports ML ranking spread and prediction IC; separates gross and net performance; checks rank turnover, target choice, feature ablations, overfitting risk, and portfolio construction effects.
 
-XGBoost, LightGBM, SHAP, and hmmlearn are supported as optional engines. If those packages are not installed or are incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
+XGBoost is included in the default requirements. LightGBM, SHAP, and hmmlearn remain optional engines/extensions. If an optional package is not installed or is incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
 
 Stage A2 feature groups include:
 
@@ -108,10 +108,10 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Optional Stage A2 engines:
+Optional Stage A2 extensions:
 
 ```bash
-pip install xgboost lightgbm shap hmmlearn
+pip install lightgbm shap hmmlearn
 ```
 
 ## Run

@@ -22,7 +22,7 @@ The primary target is next-month excess return versus SPY. This focuses the mode
 
 ## 6. Model Framework
 
-The default model ladder runs the full supported model set: Elastic Net, Decision Tree, Random Forest, Gradient Boosting, optional XGBoost, and optional LightGBM. Optional engines fall back to sklearn histogram gradient boosting if unavailable.
+The default model ladder runs Elastic Net, Random Forest, and XGBoost. Decision Tree, Gradient Boosting, and optional LightGBM remain supported in code for heavier offline comparisons.
 
 ## 7. Walk-Forward Validation
 
