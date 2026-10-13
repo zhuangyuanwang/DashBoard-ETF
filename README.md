@@ -9,7 +9,7 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 ## Features
 
 - Run and compare Stage A2 white-box ML models automatically using walk-forward OOS metrics
-- Build Equal Weight, Score Weighted, Inverse-Vol / Risk-Parity Style, and beta-neutral research portfolios
+- Build Equal Weight, Score Weighted, and Inverse-Vol / Risk-Parity Style long-only research portfolios
 - Visualize rule-based regime proxy states, factor exposure heatmaps, stress tests, execution costs, and SHAP/native feature importance drift
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
 - Build 12-1 momentum, low-volatility, beta, drawdown, and trend features
@@ -30,20 +30,21 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 **Stage A1** is the linear benchmark lab. It builds transparent price-based features, trains OLS/Ridge/LASSO/Elastic Net models, and runs true walk-forward portfolio tests. The goal is to create a simple baseline that later ML systems must beat.
 
-**Stage A2** is now a presentation-focused white-box ML long-only stock selection dashboard. It compares fast white-box ML models automatically, selects the best model using walk-forward out-of-sample metrics, chooses a 30/40/50 stock holding count, compares portfolio construction methods, and presents the recommended stock portfolio first.
+**Stage A2** is now a presentation-focused white-box ML long-only stock selection dashboard. It compares fast white-box ML models automatically, selects the best model using walk-forward out-of-sample metrics, chooses a 10/15/20 stock holding count, compares portfolio construction methods, and presents the recommended stock portfolio first.
 
 Both labs use walk-forward logic: each prediction month trains only on data before that month, then trades the following period. Dashboard performance is intended for research and education, not live investment advice.
 
 ## Stage A2 ML Ranking Pipeline
 
-Stage A2 ranks stocks each month by predicted next-month excess return versus SPY, then passes the ranking scores into Equal Weight, Score Weighted, Inverse-Vol / Risk-Parity Style, and beta-neutral research portfolios. It does not use random K-fold validation. The final audience is not expected to tune model parameters from the UI.
+Stage A2 ranks stocks each month by predicted next-month excess return versus SPY, then passes the ranking scores into Equal Weight, Score Weighted, and Inverse-Vol / Risk-Parity Style long-only research portfolios. It does not use random K-fold validation. The final audience is not expected to tune model parameters from the UI.
 
 The dashboard automatically:
 
 - Runs a balanced default model set: Elastic Net, Random Forest, and XGBoost. Gradient Boosting, LightGBM, and Decision Tree remain supported in code for heavier offline comparisons.
+- Ranks the first 120 tickers from `data/stock_universe.csv` by default, plus SPY and risk-proxy ETFs for features and benchmarking.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
-- Selects the number of stocks to hold from 30, 40, or 50 using walk-forward OOS diagnostics.
-- Compares Equal Weight Top N, Score Weighted Top N, Inverse-Vol / Risk-Parity Style Top N, and Beta-Neutral Long/Short.
+- Selects the number of stocks to hold from 10, 15, or 20 using walk-forward OOS diagnostics, because a 5% minimum position rule implies at most 20 holdings.
+- Compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N while enforcing a 5% minimum stock weight.
 - Recommends the portfolio method by OOS Sharpe, then drawdown, turnover, and cost drag.
 - Shows current holdings, a live-period monitor, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
 

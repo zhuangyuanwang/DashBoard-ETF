@@ -3129,7 +3129,7 @@ def render_unified_ranking_tab(asset_ranking, position_allocation, initial_capit
             breakdown_cols = ["Ticker", "Category", "Final Score", "Rule-Based Score", "Learned White-Box Score", "Stock Strategy Support"] + stock_strategy_columns
             st.dataframe(
                 stock_rows[breakdown_cols]
-                .head(50)
+                .head(120)
                 .style.format({column: "{:.2f}" for column in ["Final Score", "Rule-Based Score", "Learned White-Box Score"] + stock_strategy_columns}),
                 use_container_width=True,
             )

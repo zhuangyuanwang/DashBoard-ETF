@@ -30,7 +30,7 @@ Each prediction month trains only on prior months, predicts the next month cross
 
 ## 8. Portfolio Construction
 
-The dashboard compares Equal Weight Top N, Score Weighted Top N, Inverse-Vol / Risk-Parity Style Top N, and Beta-Neutral Long/Short. The system tests 30, 40, and 50 stock holding counts and chooses using walk-forward OOS metrics.
+The dashboard compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N. The system tests 10, 15, and 20 stock holding counts so every stock position can remain at or above 5%, then chooses using walk-forward OOS metrics.
 
 ## 9. Risk Management
 

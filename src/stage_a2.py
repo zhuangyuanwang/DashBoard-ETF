@@ -11,7 +11,8 @@ STAGE_A2_INITIAL_CAPITAL = 1_000_000
 SECTOR_ETFS = ["XLF", "XLE", "XLK", "XLI", "XLP", "XLU", "XLV"]
 GLOBAL_PROXIES = ["SPY", "QQQ", "IWM", "EFA", "EEM", "EWJ", "VGK", "TLT", "IEF", "SHY", "GLD", "DBC", "HYG", "LQD"]
 A2_ETF_SYMBOLS = set(SECTOR_ETFS + GLOBAL_PROXIES)
-MAX_LONG_ONLY_WEIGHT = 0.05
+MIN_STOCK_WEIGHT = 0.05
+MAX_LONG_ONLY_HOLDINGS = int(1 / MIN_STOCK_WEIGHT)
 TARGET_TYPES = [
     "Next-month raw return",
     "Next-month excess return vs SPY",
@@ -24,18 +25,19 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Initial Capital": STAGE_A2_INITIAL_CAPITAL,
     "Rebalance Frequency": "Monthly",
     "Transaction Cost Bps": 10.0,
-    "Candidate Stock Holdings": [30, 40, 50],
-    "Default Stock Holdings": 30,
-    "Max Stock Weight": MAX_LONG_ONLY_WEIGHT,
+    "Candidate Stock Holdings": [10, 15, 20],
+    "Default Stock Holdings": 20,
+    "Minimum Stock Weight": MIN_STOCK_WEIGHT,
     "Benchmark": "SPY",
     "Research Window Years": 10,
     "Target Type": "Next-month excess return vs SPY",
-    "Target Volatility": 0.12,
+    "Target Volatility": 1.0,
     "Weight Smoothing": 0.0,
-    "Regime Overlay": True,
+    "Regime Overlay": False,
     "Max Drawdown Guard": 0.15,
     "Monthly Turnover Cap": 0.75,
     "Rebalance Threshold": 0.03,
+    "Research Universe Size": 120,
 }
 ASSET_CATEGORY_MAP = {
     **{symbol: "Sector ETF" for symbol in SECTOR_ETFS},
@@ -792,29 +794,21 @@ def hrp_weights(returns: pd.DataFrame) -> pd.Series:
     return weights / weights.sum()
 
 
-def cap_and_redistribute_long_weights(weights: pd.Series, max_weight: float = MAX_LONG_ONLY_WEIGHT) -> tuple[pd.Series, bool]:
+def floor_and_normalize_long_weights(weights: pd.Series, min_weight: float = MIN_STOCK_WEIGHT) -> tuple[pd.Series, bool]:
     weights = weights.clip(lower=0).fillna(0.0)
     if weights.sum() <= 0:
         return weights, False
+    max_holdings = int(1 / min_weight)
+    was_trimmed = False
+    if len(weights) > max_holdings:
+        weights = weights.sort_values(ascending=False).head(max_holdings)
+        was_trimmed = True
     weights = weights / weights.sum()
-    capped = weights.copy()
-    was_capped = False
-    for _ in range(20):
-        over = capped > max_weight
-        if not over.any():
-            break
-        was_capped = True
-        excess = (capped[over] - max_weight).sum()
-        capped[over] = max_weight
-        under = capped < max_weight
-        if not under.any() or excess <= 0:
-            break
-        under_weights = capped[under]
-        if under_weights.sum() <= 0:
-            capped[under] += excess / under.sum()
-        else:
-            capped[under] += excess * under_weights / under_weights.sum()
-    return capped / capped.sum() if capped.sum() > 0 else capped, was_capped
+    base_allocation = len(weights) * min_weight
+    if base_allocation >= 1:
+        return pd.Series(1 / len(weights), index=weights.index), was_trimmed or bool((weights < min_weight).any())
+    floored = min_weight + weights * (1 - base_allocation)
+    return floored / floored.sum(), was_trimmed or bool((weights < min_weight).any())
 
 
 def cluster_variance(cov: pd.DataFrame, assets: list[str]) -> float:
@@ -842,7 +836,7 @@ def ledoit_wolf_weights(returns: pd.DataFrame, scores: pd.Series) -> pd.Series:
     weights = pd.Series(raw, index=assets)
     if weights.sum() <= 0:
         weights = pd.Series(1 / len(assets), index=assets)
-    weights, _ = cap_and_redistribute_long_weights(weights)
+    weights, _ = floor_and_normalize_long_weights(weights)
     return weights
 
 
@@ -854,7 +848,7 @@ def fractional_kelly_weights(returns: pd.DataFrame, scores: pd.Series, fraction:
     raw = (scores.loc[assets].clip(lower=0) / variance).replace([np.inf, -np.inf], np.nan).fillna(0.0)
     if raw.sum() <= 0:
         raw = pd.Series(1.0, index=assets)
-    weights, _ = cap_and_redistribute_long_weights(raw)
+    weights, _ = floor_and_normalize_long_weights(raw)
     return weights * fraction
 
 
@@ -957,7 +951,8 @@ def build_stage_a2_portfolios(
     daily_returns = close.pct_change(fill_method=None).dropna()
     prediction_frame = predictions.rename("score").reset_index().set_index("date")
     month_ends = close.resample("ME").last().index
-    strategy_names = ["Equal Weight Top N", "Score Weighted Top N", "Inverse-Vol / Risk-Parity Style Top N", "Beta-Neutral Long/Short"]
+    top_n = min(int(top_n), MAX_LONG_ONLY_HOLDINGS)
+    strategy_names = ["Equal Weight Top N", "Score Weighted Top N", "Inverse-Vol / Risk-Parity Style Top N"]
     returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     gross_returns_by_strategy = {name: pd.Series(0.0, index=daily_returns.index) for name in strategy_names}
     previous_weights = {name: pd.Series(0.0, index=close.columns) for name in strategy_names}
@@ -981,7 +976,7 @@ def build_stage_a2_portfolios(
         if len(tradable) < 8:
             continue
         scores = scores.loc[tradable]
-        top_assets = scores.head(max(1, top_n)).index.tolist()
+        top_assets = scores.head(max(1, min(top_n, MAX_LONG_ONLY_HOLDINGS))).index.tolist()
         lookback = daily_returns.loc[:signal_date].tail(252)
 
         target_weights = {}
@@ -991,11 +986,10 @@ def build_stage_a2_portfolios(
         shifted_scores = top_scores - top_scores.min() + 1e-6
         if shifted_scores.sum() <= 0:
             shifted_scores = pd.Series(1.0, index=top_scores.index)
-        score_weight, _ = cap_and_redistribute_long_weights(shifted_scores)
+        score_weight, _ = floor_and_normalize_long_weights(shifted_scores)
         target_weights["Score Weighted Top N"] = score_weight.reindex(close.columns).fillna(0.0)
-        inverse_vol_weight, _ = cap_and_redistribute_long_weights(hrp_weights(lookback[top_assets]))
+        inverse_vol_weight, _ = floor_and_normalize_long_weights(hrp_weights(lookback[top_assets]))
         target_weights["Inverse-Vol / Risk-Parity Style Top N"] = inverse_vol_weight.reindex(close.columns).fillna(0.0)
-        target_weights["Beta-Neutral Long/Short"] = beta_neutral_weights(lookback, scores).reindex(close.columns).fillna(0.0)
 
         period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_date)
         if not period_mask.any():
@@ -1009,6 +1003,10 @@ def build_stage_a2_portfolios(
                 smoothing,
                 enable_regime_overlay,
             )
+            long_weights = weights[weights > 0]
+            if not long_weights.empty:
+                long_weights, _ = floor_and_normalize_long_weights(long_weights)
+                weights = long_weights.reindex(weights.index).fillna(0.0)
             previous = previous_weights[strategy_name].reindex(weights.index).fillna(0.0)
             requested_turnover = (weights - previous).abs().sum()
             rebalance_skipped = False
@@ -1055,7 +1053,7 @@ def build_stage_a2_portfolios(
                     "Gross Exposure": weights.abs().sum(),
                     "Net Exposure": weights.sum(),
                     "Max Position Weight": weights.max(),
-                    "Concentration Warning": "Yes" if weights.max() > MAX_LONG_ONLY_WEIGHT + 1e-9 else "No",
+                    "Minimum Weight Rule": "Pass" if weights[weights > 0].min() >= MIN_STOCK_WEIGHT - 1e-9 else "Fail",
                     "Long Count": int((weights > 0).sum()),
                     "Short Count": int((weights < 0).sum()),
                     "Max Drawdown Limit": max_drawdown_limit,
@@ -2318,7 +2316,7 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
     st.subheader("Portfolio Construction Diagnosis")
     holding_count_leaderboard = bundle.get("holding_count_leaderboard", pd.DataFrame())
     if not holding_count_leaderboard.empty:
-        st.write("Holding count selection: the system compares 30/40/50 stocks using walk-forward OOS metrics.")
+        st.write("Holding count selection: the system compares 10/15/20 stocks so every stock position can stay at or above 5%.")
         st.dataframe(
             holding_count_leaderboard.style.format(
                 {
@@ -2381,8 +2379,8 @@ def render_stage_a2_current_portfolio(bundle: dict) -> None:
     st.plotly_chart(px.bar(sector_exposure, x="Category", y="Weight", title="Current Sector Exposure"), use_container_width=True, key="a2_current_sector_exposure")
     if not sector_exposure.empty and sector_exposure["Weight"].max() > 0.25:
         st.warning("Sector concentration warning: one sector exceeds the 25% guideline.")
-    if holdings["Weight"].abs().max() > MAX_LONG_ONLY_WEIGHT + 1e-9:
-        st.warning("One or more stock weights exceed the 5% max stock weight guideline.")
+    if holdings["Weight"].abs().min() < MIN_STOCK_WEIGHT - 1e-9:
+        st.warning("One or more stock weights are below the 5% minimum stock weight rule.")
     if holdings["Weight"].abs().head(3).sum() > 0.75:
         st.warning("Portfolio is concentrated: top three absolute weights exceed 75%.")
     if diagnostics.get("Prediction Source") == "Fallback":
@@ -2506,8 +2504,8 @@ def render_stage_a2_risk_dashboard(bundle: dict) -> None:
     st.plotly_chart(px.line(rolling_sharpe(returns).to_frame("Rolling Sharpe"), title="Rolling Sharpe"), use_container_width=True, key="a2_risk_rolling_sharpe")
     equity = (1 + returns).cumprod()
     st.plotly_chart(px.line((equity / equity.cummax() - 1).to_frame("Rolling Drawdown"), title="Rolling Drawdown"), use_container_width=True, key="a2_risk_rolling_drawdown")
-    if not execution.empty and execution["Max Position Weight"].max() > MAX_LONG_ONLY_WEIGHT:
-        st.warning("Concentration warning: at least one historical rebalance exceeded the max stock weight guideline.")
+    if not execution.empty and "Minimum Weight Rule" in execution and execution["Minimum Weight Rule"].eq("Fail").any():
+        st.warning("Minimum weight warning: at least one historical rebalance fell below the 5% stock weight rule.")
     if not execution.empty:
         st.metric("Total Transaction Cost Estimate", f"{execution.loc[execution['Portfolio'].eq(recommended), 'Transaction Cost'].sum():.2%}")
 
@@ -2603,10 +2601,10 @@ The model scores each stock using momentum, relative strength, volatility, drawd
 Each prediction month trains only on data before that month. Forward returns use `shift(-1)` only to build training targets, not prediction-time features.
 
 ### Selection Rules
-The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The holding count is selected from 30/40/50 stocks using OOS metrics. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
+The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The holding count is selected from 10/15/20 stocks so every position can remain at or above the 5% minimum. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
 
 ### Portfolio Methods
-Equal Weight Top N is the simple baseline. Score Weighted Top N gives larger weights to stronger ML scores subject to the 5% cap. Inverse-Vol / Risk-Parity Style Top N gives more weight to lower-volatility names. Beta-Neutral Long/Short is labeled as an extension because it uses short exposure.
+Equal Weight Top N is the simple baseline. Score Weighted Top N gives larger weights to stronger ML scores while enforcing the 5% minimum position rule. Inverse-Vol / Risk-Parity Style Top N gives more weight to lower-volatility names while also enforcing the 5% minimum.
 
 ### Current Limitations
 This uses the local stock universe file rather than full point-in-time Russell 3000 / MSCI ACWI constituent coverage. FRED macro features may be included, but GDELT, Google Trends, and SEC EDGAR are not fully implemented in this Stage A2 dashboard. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. Black-Litterman and full TWAP/VWAP simulation are not implemented yet. ML may underperform simple strategies, and this dashboard reports that transparently.
@@ -2625,7 +2623,7 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     start_date = end_date - pd.DateOffset(years=int(config["Research Window Years"]))
     universe_table = pd.read_csv(stock_universe_file) if stock_universe_file.exists() else pd.DataFrame()
     if "Ticker" in universe_table:
-        stock_symbols = tuple(universe_table["Ticker"].dropna().astype(str).str.upper().head(50).tolist())
+        stock_symbols = tuple(universe_table["Ticker"].dropna().astype(str).str.upper().head(int(config["Research Universe Size"])).tolist())
         sector_map = universe_table.set_index("Ticker")["Sector"].dropna().to_dict() if "Sector" in universe_table else {}
         ASSET_CATEGORY_MAP.update({str(ticker).upper(): sector for ticker, sector in sector_map.items()})
     else:
