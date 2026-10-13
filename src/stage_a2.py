@@ -1556,6 +1556,59 @@ def monthly_return_table(returns: pd.Series) -> pd.DataFrame:
     return table.pivot(index="Year", columns="Month", values="Return")
 
 
+def build_stage_a2_profit_attribution(close: pd.DataFrame, weight_history: pd.DataFrame, recommended_method: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if close.empty or weight_history.empty or not recommended_method:
+        return pd.DataFrame(), pd.DataFrame()
+    method_weights = weight_history[weight_history["Portfolio"].eq(recommended_method)].copy()
+    if method_weights.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    daily_returns = close.pct_change(fill_method=None).fillna(0.0)
+    rebalance_dates = pd.Index(sorted(pd.to_datetime(method_weights["Date"].dropna().unique())))
+    rows = []
+    for idx, signal_date in enumerate(rebalance_dates):
+        next_date = rebalance_dates[idx + 1] if idx + 1 < len(rebalance_dates) else daily_returns.index.max()
+        period_mask = (daily_returns.index > signal_date) & (daily_returns.index <= next_date)
+        if not period_mask.any():
+            continue
+        weights = method_weights.loc[method_weights["Date"].eq(signal_date), ["Ticker", "Weight", "Category"]].dropna()
+        weights = weights[weights["Ticker"].isin(daily_returns.columns)]
+        if weights.empty:
+            continue
+        weight_map = weights.set_index("Ticker")["Weight"]
+        category_map = weights.set_index("Ticker")["Category"]
+        period_returns = daily_returns.loc[period_mask, weight_map.index]
+        contribution = period_returns.mul(weight_map, axis=1)
+        for ticker in contribution.columns:
+            rows.append(
+                {
+                    "Rebalance Date": signal_date,
+                    "Ticker": ticker,
+                    "Category": category_map.get(ticker, "Stock"),
+                    "Average Weight": weight_map[ticker],
+                    "Contribution": contribution[ticker].sum(),
+                    "Asset Return During Holding": period_returns[ticker].sum(),
+                    "Positive Days": (contribution[ticker] > 0).mean(),
+                }
+            )
+    detail = pd.DataFrame(rows)
+    if detail.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    by_ticker = (
+        detail.groupby(["Ticker", "Category"], as_index=False)
+        .agg(
+            Total_Contribution=("Contribution", "sum"),
+            Average_Weight=("Average Weight", "mean"),
+            Holding_Months=("Rebalance Date", "nunique"),
+            Average_Holding_Return=("Asset Return During Holding", "mean"),
+            Positive_Day_Rate=("Positive Days", "mean"),
+        )
+        .sort_values("Total_Contribution", ascending=False)
+    )
+    detail["Month"] = pd.to_datetime(detail["Rebalance Date"]).dt.to_period("M").dt.to_timestamp("M")
+    by_month = detail.groupby("Month", as_index=False)["Contribution"].sum()
+    return by_ticker, by_month
+
+
 def format_diagnostic_metrics(
     returns_map: dict[str, pd.Series],
     benchmark: pd.Series | None = None,
@@ -2192,6 +2245,54 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
         )
     if benchmark is not None:
         st.caption("Benchmark table is calculated over the same available OOS return window as the Stage A2 recommended portfolio.")
+
+    st.subheader("What Actually Made Money")
+    attribution, monthly_attribution = build_stage_a2_profit_attribution(bundle["close"], result[7], recommended)
+    if attribution.empty:
+        st.info("Profit attribution is unavailable because historical portfolio weights are missing.")
+    else:
+        top_winners = attribution.head(10).copy()
+        top_losers = attribution.tail(10).sort_values("Total_Contribution").copy()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Top Contributor", top_winners.iloc[0]["Ticker"])
+        c2.metric("Top Contributor Return Contribution", f"{top_winners.iloc[0]['Total_Contribution']:.2%}")
+        c3.metric("Positive Contributor Share", f"{(attribution['Total_Contribution'] > 0).mean():.1%}")
+        st.plotly_chart(
+            px.bar(top_winners, x="Ticker", y="Total_Contribution", color="Category", title="Top Stock Return Contributors"),
+            use_container_width=True,
+            key="a2_profit_top_contributors",
+        )
+        st.dataframe(
+            top_winners[["Ticker", "Category", "Total_Contribution", "Average_Weight", "Holding_Months", "Average_Holding_Return", "Positive_Day_Rate"]].style.format(
+                {
+                    "Total_Contribution": "{:.2%}",
+                    "Average_Weight": "{:.2%}",
+                    "Average_Holding_Return": "{:.2%}",
+                    "Positive_Day_Rate": "{:.1%}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        with st.expander("Largest Detractors"):
+            st.dataframe(
+                top_losers[["Ticker", "Category", "Total_Contribution", "Average_Weight", "Holding_Months", "Average_Holding_Return", "Positive_Day_Rate"]].style.format(
+                    {
+                        "Total_Contribution": "{:.2%}",
+                        "Average_Weight": "{:.2%}",
+                        "Average_Holding_Return": "{:.2%}",
+                        "Positive_Day_Rate": "{:.1%}",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        if not monthly_attribution.empty:
+            st.plotly_chart(
+                px.bar(monthly_attribution, x="Month", y="Contribution", title="Monthly Return Contribution From Selected Holdings"),
+                use_container_width=True,
+                key="a2_profit_monthly_attribution",
+            )
 
     st.subheader("ML Signal Quality")
     if signal_monthly.empty:
