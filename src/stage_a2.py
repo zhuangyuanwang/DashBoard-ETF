@@ -37,7 +37,7 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Max Drawdown Guard": 0.15,
     "Monthly Turnover Cap": 0.75,
     "Rebalance Threshold": 0.03,
-    "Research Universe Size": 120,
+    "Research Universe Size": 200,
 }
 ASSET_CATEGORY_MAP = {
     **{symbol: "Sector ETF" for symbol in SECTOR_ETFS},
@@ -142,6 +142,54 @@ def load_fred_macro(start_date: str, end_date: str) -> pd.DataFrame:
     if "industrial_production" in macro.columns:
         macro["industrial_production_yoy"] = macro["industrial_production"].pct_change(12, fill_method=None)
     return macro
+
+
+def normalize_point_in_time_universe(universe: pd.DataFrame) -> pd.DataFrame:
+    required = {"Ticker", "StartDate", "EndDate"}
+    if universe.empty or not required.issubset(universe.columns):
+        return pd.DataFrame()
+    pit = universe.copy()
+    pit["Ticker"] = pit["Ticker"].astype(str).str.upper().str.strip()
+    pit["StartDate"] = pd.to_datetime(pit["StartDate"], errors="coerce")
+    pit["EndDate"] = pd.to_datetime(pit["EndDate"], errors="coerce")
+    for column in ["Sector", "Industry", "Category"]:
+        if column not in pit.columns:
+            pit[column] = "Other"
+        pit[column] = pit[column].fillna("Other").astype(str).str.strip().replace("", "Other")
+    pit = pit[pit["Ticker"].ne("") & pit["StartDate"].notna()]
+    return pit.drop_duplicates(["Ticker", "StartDate", "EndDate"]).reset_index(drop=True)
+
+
+def active_point_in_time_symbols(point_in_time_universe: pd.DataFrame, as_of_date: pd.Timestamp) -> set[str]:
+    pit = normalize_point_in_time_universe(point_in_time_universe)
+    if pit.empty:
+        return set()
+    as_of_date = pd.to_datetime(as_of_date)
+    active = pit[(pit["StartDate"] <= as_of_date) & (pit["EndDate"].isna() | (pit["EndDate"] > as_of_date))]
+    return set(active["Ticker"])
+
+
+def filter_panel_to_point_in_time_universe(
+    x: pd.DataFrame,
+    y: pd.Series,
+    forward_returns: pd.Series,
+    point_in_time_universe: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    pit = normalize_point_in_time_universe(point_in_time_universe)
+    if pit.empty or x.empty:
+        return x, y, forward_returns
+    row_dates = x.index.get_level_values("date")
+    row_symbols = x.index.get_level_values("symbol")
+    active_mask = pd.Series(False, index=x.index)
+    for date in pd.Index(sorted(row_dates.unique())):
+        active = active_point_in_time_symbols(pit, date)
+        if active:
+            date_mask = row_dates == date
+            active_mask.loc[date_mask] = row_symbols[date_mask].isin(active)
+    keep_index = x.index[active_mask.to_numpy()]
+    filtered_y = y.reindex(keep_index)
+    valid_index = filtered_y[filtered_y.notna()].index
+    return x.loc[valid_index], filtered_y.loc[valid_index], forward_returns.reindex(valid_index)
 
 
 def build_stage_a2_features(
@@ -945,6 +993,7 @@ def build_stage_a2_portfolios(
     rebalance_threshold: float,
     top_n: int = 5,
     eligible_symbols: tuple[str, ...] | None = None,
+    point_in_time_universe: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if predictions.empty:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
@@ -972,6 +1021,9 @@ def build_stage_a2_portfolios(
             signal_rows = signal_rows.to_frame().T
         scores = signal_rows.set_index("symbol")["score"].dropna().sort_values(ascending=False)
         eligible = set(eligible_symbols) if eligible_symbols is not None else set(daily_returns.columns)
+        active_symbols = active_point_in_time_symbols(point_in_time_universe, signal_date) if point_in_time_universe is not None else set()
+        if active_symbols:
+            eligible &= active_symbols
         tradable = [symbol for symbol in scores.index if symbol in daily_returns.columns and symbol in eligible]
         if len(tradable) < 8:
             continue
@@ -1058,6 +1110,7 @@ def build_stage_a2_portfolios(
                     "Short Count": int((weights < 0).sum()),
                     "Max Drawdown Limit": max_drawdown_limit,
                     "Drawdown Guard Triggered": "Yes" if drawdown_guard_triggered else "No",
+                    "Universe Mode": "Point-in-Time" if active_symbols else "Static Research Universe",
                     **overlay_info,
                 }
             )
@@ -1235,8 +1288,11 @@ def run_stage_a2_research(
     top_n: int = 5,
     prediction_step: int = 1,
     eligible_symbols: tuple[str, ...] | None = None,
+    point_in_time_universe: pd.DataFrame | None = None,
 ):
     x, y, forward_returns = build_stage_a2_features(close, macro, target_type=target_type, return_forward_returns=True)
+    if point_in_time_universe is not None and not point_in_time_universe.empty:
+        x, y, forward_returns = filter_panel_to_point_in_time_universe(x, y, forward_returns, point_in_time_universe)
     diagnostics = {
         "Requested Model": model_name,
         "Effective Model": model_name,
@@ -1245,6 +1301,7 @@ def run_stage_a2_research(
         "Feature Samples": len(x),
         "Feature Dates": len(x.index.get_level_values("date").unique()) if not x.empty else 0,
         "Feature Assets": len(x.index.get_level_values("symbol").unique()) if not x.empty else 0,
+        "Universe Mode": "Point-in-Time" if point_in_time_universe is not None and not point_in_time_universe.empty else "Static Research Universe",
     }
     selected_params = {}
     tuning_results = pd.DataFrame()
@@ -1309,6 +1366,7 @@ def run_stage_a2_research(
         rebalance_threshold,
         top_n,
         eligible_symbols,
+        point_in_time_universe,
     )
     if portfolio_returns.empty:
         return (
@@ -1452,6 +1510,7 @@ def select_stage_a2_holding_count(
     base_result: tuple,
     benchmark: pd.Series | None,
     eligible_symbols: tuple[str, ...],
+    point_in_time_universe: pd.DataFrame | None = None,
 ) -> tuple[int, dict[int, tuple], pd.DataFrame, str]:
     config = STAGE_A2_PRESENTATION_CONFIG
     rows = []
@@ -1470,6 +1529,7 @@ def select_stage_a2_holding_count(
             config["Rebalance Threshold"],
             top_n=int(holding_count),
             eligible_symbols=eligible_symbols,
+            point_in_time_universe=point_in_time_universe,
         )
         result = list(base_result)
         result[4] = portfolio_returns
@@ -2038,7 +2098,12 @@ def compare_stress_to_spy(strategy_returns: pd.Series, benchmark: pd.Series | No
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame, eligible_symbols: tuple[str, ...] | None = None) -> dict:
+def run_stage_a2_presentation_research(
+    close: pd.DataFrame,
+    macro: pd.DataFrame,
+    eligible_symbols: tuple[str, ...] | None = None,
+    point_in_time_universe: pd.DataFrame | None = None,
+) -> dict:
     config = STAGE_A2_PRESENTATION_CONFIG
     eligible_symbols = eligible_symbols or tuple(symbol for symbol in close.columns if symbol != "SPY")
     model_results = {}
@@ -2061,6 +2126,7 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame,
             top_n=int(config["Default Stock Holdings"]),
             prediction_step=2,
             eligible_symbols=eligible_symbols,
+            point_in_time_universe=point_in_time_universe,
         )
     benchmark = close["SPY"].pct_change(fill_method=None) if "SPY" in close else None
     selected_model, model_leaderboard, model_reason = select_best_stage_a2_model(model_results, benchmark)
@@ -2070,6 +2136,7 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame,
         base_selected_result,
         benchmark,
         eligible_symbols,
+        point_in_time_universe,
     )
     selected_result = holding_count_results.get(selected_holding_count) or (model_results[selected_model] if selected_model else next(iter(model_results.values())))
     recommended_method, portfolio_comparison, portfolio_reason = recommend_stage_a2_portfolio_method(
@@ -2085,6 +2152,7 @@ def run_stage_a2_presentation_research(close: pd.DataFrame, macro: pd.DataFrame,
         "holding_count_leaderboard": holding_count_leaderboard,
         "holding_count_reason": holding_count_reason,
         "eligible_symbols": eligible_symbols,
+        "point_in_time_universe": point_in_time_universe if point_in_time_universe is not None else pd.DataFrame(),
         "model_leaderboard": model_leaderboard,
         "model_reason": model_reason,
         "recommended_method": recommended_method,
@@ -2723,12 +2791,23 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     end_date = pd.Timestamp.today().normalize()
     start_date = end_date - pd.DateOffset(years=int(config["Research Window Years"]))
     universe_table = pd.read_csv(stock_universe_file) if stock_universe_file.exists() else pd.DataFrame()
-    if "Ticker" in universe_table:
+    pit_file = stock_universe_file.with_name("stock_universe_point_in_time.csv")
+    pit_source = pd.read_csv(pit_file) if pit_file.exists() else universe_table
+    point_in_time_universe = normalize_point_in_time_universe(pit_source)
+    if not point_in_time_universe.empty:
+        overlap = point_in_time_universe[
+            (point_in_time_universe["StartDate"] <= end_date)
+            & (point_in_time_universe["EndDate"].isna() | (point_in_time_universe["EndDate"] >= start_date))
+        ]
+        stock_symbols = tuple(overlap["Ticker"].dropna().astype(str).str.upper().drop_duplicates().head(int(config["Research Universe Size"])).tolist())
+        sector_map = overlap.set_index("Ticker")["Sector"].dropna().to_dict() if "Sector" in overlap else {}
+    elif "Ticker" in universe_table:
         stock_symbols = tuple(universe_table["Ticker"].dropna().astype(str).str.upper().head(int(config["Research Universe Size"])).tolist())
         sector_map = universe_table.set_index("Ticker")["Sector"].dropna().to_dict() if "Sector" in universe_table else {}
-        ASSET_CATEGORY_MAP.update({str(ticker).upper(): sector for ticker, sector in sector_map.items()})
     else:
         stock_symbols = tuple(DEFAULT_A2_STOCKS)
+        sector_map = {}
+    ASSET_CATEGORY_MAP.update({str(ticker).upper(): sector for ticker, sector in sector_map.items()})
     risk_proxy_symbols = tuple(symbol for symbol in GLOBAL_PROXIES + SECTOR_ETFS if symbol not in stock_symbols)
     selected_symbols = tuple(dict.fromkeys([*stock_symbols, *risk_proxy_symbols]))
 
@@ -2739,9 +2818,13 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     if close.empty or len(eligible_symbols) < 30:
         st.error("Not enough stock data loaded for Stage A2 long-only stock selection.")
         return
+    if not point_in_time_universe.empty:
+        st.success("Point-in-time universe mode is active: model training and portfolio selection use only stocks active as of each signal date.")
+    else:
+        st.warning("Static research universe mode is active. To avoid survivorship bias, add data/stock_universe_point_in_time.csv with Ticker, StartDate, and EndDate columns.")
 
     with st.spinner("Running ML stock ranking, selecting holding count, and comparing portfolio methods..."):
-        bundle = run_stage_a2_presentation_research(close, macro, eligible_symbols)
+        bundle = run_stage_a2_presentation_research(close, macro, eligible_symbols, point_in_time_universe)
     if not bundle["recommended_method"]:
         st.error("Stage A2 did not produce enough walk-forward results.")
         return

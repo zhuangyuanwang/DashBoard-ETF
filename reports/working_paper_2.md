@@ -10,7 +10,7 @@ The research question is whether transparent ML models can add stock-selection v
 
 ## 3. Data and Universe
 
-The dashboard uses `data/stock_universe.csv` as the current stock universe, with SPY and ETF proxies used for benchmark, sector context, and risk monitoring. Prices come from Yahoo Finance. FRED macro data is included when available and lagged before use.
+The dashboard uses `data/stock_universe.csv` as the default static research universe, with SPY and ETF proxies used for benchmark, sector context, and risk monitoring. If `data/stock_universe_point_in_time.csv` is populated with `Ticker`, `StartDate`, and `EndDate`, Stage A2 filters training rows and portfolio candidates to names active as of each signal date. Prices come from Yahoo Finance. FRED macro data is included when available and lagged before use.
 
 ## 4. Feature Engineering
 
@@ -50,8 +50,8 @@ Diagnostics include benchmark comparison, top-minus-bottom ranking spread, predi
 
 ## 13. Limitations
 
-The current version uses a practical stock universe file rather than point-in-time S&P 500 membership. Yahoo Finance data can have survivorship bias, missing history, and incomplete fundamentals. GDELT, Google Trends, SEC EDGAR, Black-Litterman, and full TWAP/VWAP simulation are future extensions unless explicitly implemented. Feature importance is not full SHAP unless SHAP is actually used.
+The default static universe is not survivorship-bias-free. Survivorship-bias-free results require a populated point-in-time membership file from a historical constituent source such as CRSP/Compustat, WRDS, Bloomberg, or another point-in-time database. Yahoo Finance data can still have ticker gaps, missing history, and incomplete fundamentals. GDELT, Google Trends, SEC EDGAR, Black-Litterman, and full TWAP/VWAP simulation are future extensions unless explicitly implemented. Feature importance is not full SHAP unless SHAP is actually used.
 
 ## 14. Future Work
 
-Future work includes larger cached universes, stronger point-in-time membership controls, optional XGBoost/LightGBM runs, richer alternative data, stricter sector constraints, and execution simulation improvements.
+Future work includes sourcing institutional point-in-time membership data, larger cached universes, optional XGBoost/LightGBM runs, richer alternative data, stricter sector constraints, and execution simulation improvements.

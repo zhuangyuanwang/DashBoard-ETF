@@ -41,7 +41,8 @@ Stage A2 ranks stocks each month by predicted next-month excess return versus SP
 The dashboard automatically:
 
 - Runs a balanced default model set: Elastic Net, Random Forest, and XGBoost. Gradient Boosting, LightGBM, and Decision Tree remain supported in code for heavier offline comparisons.
-- Ranks the first 120 tickers from `data/stock_universe.csv` by default, plus SPY and risk-proxy ETFs for features and benchmarking.
+- Ranks the first 200 tickers from `data/stock_universe.csv` by default, plus SPY and risk-proxy ETFs for features and benchmarking.
+- Supports an optional point-in-time universe file at `data/stock_universe_point_in_time.csv` with `Ticker`, `StartDate`, and `EndDate` columns to avoid using stocks before they entered the investable universe or after they exited.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Selects the number of stocks to hold from 10, 15, or 20 using walk-forward OOS diagnostics, because a 5% minimum position rule implies at most 20 holdings.
 - Compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N while enforcing a 5% minimum stock weight.
@@ -76,18 +77,18 @@ Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 - Monthly returns are noisy and hard to predict.
 - The default universe can still be sector-concentrated depending on `stock_universe.csv`.
 - Strict walk-forward validation removes look-ahead benefits that weaker backtests sometimes contain.
-- Fixed transaction costs, turnover controls, and drawdown guards reduce upside.
+- Fixed transaction costs and turnover controls reduce upside.
 - ML ranking alpha may be weaker than simple trend/beta exposure in strong bull markets.
 
 ## Limitations and Fallbacks
 
-- Historical index membership is not point-in-time survivorship-bias-free.
+- The default `stock_universe.csv` is a static research universe. Survivorship-bias-free results require a populated `data/stock_universe_point_in_time.csv` file from a historical constituent source such as CRSP/Compustat, WRDS, Bloomberg, or another point-in-time membership database.
 - Yahoo Finance and FRED data can have missing values, revisions, ticker gaps, and delayed updates.
 - A2 regime detection uses a true 3-state Gaussian HMM when `hmmlearn` is installed. Otherwise it is clearly labeled as a Gaussian-mixture regime proxy.
 - A2 inverse-vol / risk-parity style weighting is a simplified risk allocation method, not a full institutional HRP implementation.
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.
 - A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest, Gradient Boosting, optional XGBoost, and optional LightGBM remain available as heavier alternatives.
-- A2 includes risk controls: volatility targeting, optional regime exposure scaling, weight smoothing, and a daily-bar max drawdown guard. These are designed to reduce drawdown and turnover, not to guarantee a higher Sharpe ratio in every sample.
+- A2 includes optional risk controls such as volatility targeting, regime exposure scaling, weight smoothing, and a daily-bar max drawdown guard. The default research presentation disables the drawdown guard as a practical stop-loss overlay so headline results are not mechanically capped at a chosen drawdown level.
 - A1 and A2 headline performance is net of estimated costs. A2 also shows gross-vs-net attribution in the ML diagnostics tab.
 - Stress windows show "Not enough data" when the selected history does not overlap 2008, 2020, or 2022.
 
@@ -140,6 +141,7 @@ Dashboard/
 │   └── working_paper_2.md
 ├── data/
 │   └── stock_universe.csv
+│   └── stock_universe_point_in_time_template.csv
 ├── README.md
 └── requirements.txt
 ```
