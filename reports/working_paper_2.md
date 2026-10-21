@@ -26,7 +26,7 @@ The presentation model set runs Elastic Net, Random Forest, and XGBoost.
 
 ## 7. Walk-Forward Validation
 
-Each prediction month trains only on prior months, predicts the next month cross-section, ranks stocks, and forms the next monthly portfolio. Random K-fold cross-validation is not used.
+Each prediction month trains only on prior months, predicts the next month cross-section, ranks stocks, and forms the next monthly portfolio. The configured research window is 20 years, subject to point-in-time membership and delisting-aware price coverage. Random K-fold cross-validation is not used.
 
 ## 8. Portfolio Construction
 

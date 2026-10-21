@@ -30,7 +30,7 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 **Stage A1** is the linear benchmark lab. It builds transparent price-based features, trains OLS/Ridge/LASSO/Elastic Net models, and runs true walk-forward portfolio tests. The goal is to create a simple baseline that later ML systems must beat.
 
-**Stage A2** is now a presentation-focused white-box ML long-only stock selection dashboard. It compares fast white-box ML models automatically, selects the best model using walk-forward out-of-sample metrics, chooses a 10/15/20 stock holding count, compares portfolio construction methods, and presents the recommended stock portfolio first.
+**Stage A2** is now a presentation-focused white-box ML long-only stock selection dashboard. It uses a 20-year research window where the point-in-time data source permits it, compares fast white-box ML models automatically, selects the best model using walk-forward out-of-sample metrics, chooses a 10/15/20 stock holding count, compares portfolio construction methods, and presents the recommended stock portfolio first.
 
 Both labs use walk-forward logic: each prediction month trains only on data before that month, then trades the following period. Dashboard performance is intended for research and education, not live investment advice.
 

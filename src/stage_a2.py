@@ -28,7 +28,7 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Default Stock Holdings": 20,
     "Minimum Stock Weight Within Equity Sleeve": MIN_STOCK_WEIGHT,
     "Benchmark": "SPY",
-    "Research Window Years": 10,
+    "Research Window Years": 20,
     "Target Type": "Next-month excess return vs SPY",
     "Target Volatility": 0.10,
     "Weight Smoothing": 0.0,
