@@ -10,13 +10,13 @@ A Streamlit quant research dashboard using free market data. The app now has thr
 
 - Run and compare Stage A2 white-box ML models automatically using walk-forward OOS metrics
 - Build Equal Weight, Score Weighted, and Inverse-Vol / Risk-Parity Style long-only research portfolios
-- Visualize rule-based regime proxy states, factor exposure heatmaps, stress tests, execution costs, and SHAP/native feature importance drift
+- Visualize regime diagnostics, factor exposure heatmaps, stress tests, execution costs, and model feature importance
 - Run Stage A1 linear benchmark models: OLS, Ridge, LASSO, and Elastic Net
 - Build 12-1 momentum, low-volatility, beta, drawdown, and trend features
 - Evaluate 60/20/20 train/validation/test splits and combinatorial purged CV
 - Backtest equal-weight, inverse-variance risk parity, market-neutral long/short, and 130/30 portfolios with true walk-forward OOS signals
 - Display performance first with a $1,000,000 initial-capital equity curve
-- Apply transaction costs, slippage, and a monthly turnover cap
+- Apply fixed turnover-based transaction costs and a monthly turnover cap
 - Track Sharpe, Sortino, Calmar, information ratio, alpha, beta, drawdown, and hit rate
 - Select ETFs from a predefined universe
 - View price charts and daily returns by category
@@ -40,20 +40,19 @@ Stage A2 ranks stocks each month by predicted next-month excess return versus SP
 
 The dashboard automatically:
 
-- Runs a balanced default model set: Elastic Net, Random Forest, and XGBoost. Gradient Boosting, LightGBM, and Decision Tree remain supported in code for heavier offline comparisons.
+- Runs Elastic Net, Random Forest, and XGBoost as the presentation model set.
 - Ranks the first 200 tickers from `data/stock_universe.csv` by default, plus SPY and risk-proxy ETFs for features and benchmarking.
 - Supports an optional point-in-time universe file at `data/stock_universe_point_in_time.csv` with `Ticker`, `StartDate`, and `EndDate` columns to avoid using stocks before they entered the investable universe or after they exited.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Selects the number of stocks to hold from 10, 15, or 20 using walk-forward OOS diagnostics, because a 5% minimum position rule implies at most 20 holdings.
-- Compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N while enforcing a 5% minimum stock weight.
+- Compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N while keeping every name at least 5% of the invested equity sleeve.
 - Recommends the portfolio method by OOS Sharpe, then drawdown, turnover, and cost drag.
-- Shows current holdings, a live-period monitor, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
-
-The Stage A2 **Live Monitor** tab uses the latest Yahoo Finance daily bars available to the app to show the recommended strategy from June 1 of the current year through the latest loaded date, compared with SPY. It is a research monitor, not broker-confirmed live execution P&L.
+- Targets 10% annualized volatility, reduces equity exposure to at most 50% after a 10% drawdown, and retains the disclosed 15% hard drawdown research guard.
+- Shows current holdings, model explanation, performance diagnostics, risk diagnostics, stress tests, and methodology in presentation tabs.
 
 The Stage A2 **Performance Diagnostics** tab is deliberately honest when ML underperforms SPY. It compares the recommended ML strategy against SPY buy-and-hold, equal-weight stocks, 12-month momentum Top 30, and dual momentum; reports ML ranking spread and prediction IC; separates gross and net performance; checks rank turnover, target choice, feature ablations, overfitting risk, and portfolio construction effects.
 
-XGBoost is included in the default requirements. LightGBM, SHAP, and hmmlearn remain optional engines/extensions. If an optional package is not installed or is incompatible with the runtime, the dashboard clearly reports the fallback engine and keeps the research app running with sklearn histogram gradient boosting, native/sensitivity importance, or a Gaussian-mixture regime proxy.
+XGBoost and SHAP are included in the default requirements. Stage A2 uses SHAP for feature importance and labels any native/sensitivity fallback if explanation fails. `hmmlearn` remains an optional regime-detection extension.
 
 Stage A2 feature groups include:
 
@@ -70,7 +69,7 @@ Supported targets:
 - Next-month outperform-SPY classification
 - Next-month cross-sectional rank percentile
 
-The diagnostics tab shows top-minus-bottom prediction spread for all ranked assets and the ETF/global-proxy subset, prediction IC, gross-vs-net performance, transaction-cost drag, monthly turnover, fallback months, selected hyperparameters, and feature-importance stability.
+The diagnostics tab shows top-minus-bottom prediction spread, monthly Rank IC, IC volatility, positive-IC month rate, ICIR, 6- and 12-month rolling IC, gross-vs-net performance, transaction-cost drag, turnover, fallback months, selected hyperparameters, and feature-importance stability.
 
 Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 
@@ -87,8 +86,9 @@ Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 - A2 regime detection uses a true 3-state Gaussian HMM when `hmmlearn` is installed. Otherwise it is clearly labeled as a Gaussian-mixture regime proxy.
 - A2 inverse-vol / risk-parity style weighting is a simplified risk allocation method, not a full institutional HRP implementation.
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.
-- A2 uses a Decision Tree as the default white-box model because it is faster and has been more stable in recent walk-forward tests than the default Random Forest. Random Forest, Gradient Boosting, optional XGBoost, and optional LightGBM remain available as heavier alternatives.
-- A2 includes optional risk controls such as volatility targeting, regime exposure scaling, weight smoothing, and a daily-bar max drawdown guard. The default research presentation disables the drawdown guard as a practical stop-loss overlay so headline results are not mechanically capped at a chosen drawdown level.
+- A2 compares Elastic Net, Random Forest, and XGBoost; model selection remains a research-selection step and is not an independent final holdout.
+- A2 targets 10% annualized volatility and may hold cash. It cuts equity exposure after a 10% drawdown and uses an idealized daily-bar 15% hard drawdown guard, so results must disclose that mechanical protection.
+- GDELT, Google Trends, SEC EDGAR, Black-Litterman, market-impact costs, and TWAP/VWAP simulation are not implemented and must not be presented as completed results.
 - A1 and A2 headline performance is net of estimated costs. A2 also shows gross-vs-net attribution in the ML diagnostics tab.
 - Stress windows show "Not enough data" when the selected history does not overlap 2008, 2020, or 2022.
 
@@ -113,7 +113,7 @@ pip install -r requirements.txt
 Optional Stage A2 extensions:
 
 ```bash
-pip install lightgbm shap hmmlearn
+pip install lightgbm hmmlearn
 ```
 
 ## Run

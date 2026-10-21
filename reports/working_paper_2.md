@@ -22,7 +22,7 @@ The primary target is next-month excess return versus SPY. This focuses the mode
 
 ## 6. Model Framework
 
-The default model ladder runs Elastic Net, Random Forest, and XGBoost. Decision Tree, Gradient Boosting, and optional LightGBM remain supported in code for heavier offline comparisons.
+The presentation model set runs Elastic Net, Random Forest, and XGBoost.
 
 ## 7. Walk-Forward Validation
 
@@ -30,15 +30,15 @@ Each prediction month trains only on prior months, predicts the next month cross
 
 ## 8. Portfolio Construction
 
-The dashboard compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N. The system tests 10, 15, and 20 stock holding counts so every stock position can remain at or above 5%, then chooses using walk-forward OOS metrics.
+The dashboard compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N. The system tests 10, 15, and 20 stock holding counts. Every name remains at or above 5% of the invested equity sleeve; volatility and drawdown controls can leave the remainder in cash.
 
 ## 9. Risk Management
 
-Risk monitoring includes single-name concentration, sector exposure, beta to SPY, rolling volatility, rolling drawdown, rolling Sharpe, turnover, transaction cost drag, and regime proxy information when available.
+The portfolio targets 10% annualized volatility using trailing data. A 10% drawdown reduces equity exposure to at most 50%, while the existing 15% hard drawdown guard stops risk for the rest of that rebalance period. The hard guard is an idealized research assumption, not guaranteed real-world execution. Monitoring also includes concentration, sector exposure, beta to SPY, rolling volatility, rolling Sharpe, turnover, and regime diagnostics.
 
 ## 10. Execution Cost Assumptions
 
-The backtest applies fixed transaction costs based on monthly turnover. Results are shown gross and net where available.
+The backtest applies 10 bps fixed transaction costs to monthly two-sided turnover and caps requested monthly L1 turnover at 0.50. Market-impact and TWAP/VWAP models are intentionally excluded.
 
 ## 11. Results
 
@@ -46,11 +46,11 @@ Final results should be read from the live dashboard because they update with th
 
 ## 12. Diagnostics
 
-Diagnostics include benchmark comparison, top-minus-bottom ranking spread, prediction IC, rank turnover, gross-versus-net performance, target diagnostics, feature ablation, and portfolio construction comparison.
+Diagnostics include benchmark comparison, top-minus-bottom ranking spread, monthly Rank IC, IC standard deviation, positive-IC month rate, monthly and annualized ICIR, IC t-statistic, 6- and 12-month rolling IC, rank turnover, gross-versus-net performance, target diagnostics, feature ablation, and portfolio construction comparison.
 
 ## 13. Limitations
 
-The default static universe is not survivorship-bias-free. Survivorship-bias-free results require a populated point-in-time membership file from a historical constituent source such as CRSP/Compustat, WRDS, Bloomberg, or another point-in-time database. Yahoo Finance data can still have ticker gaps, missing history, and incomplete fundamentals. GDELT, Google Trends, SEC EDGAR, Black-Litterman, and full TWAP/VWAP simulation are future extensions unless explicitly implemented. Feature importance is not full SHAP unless SHAP is actually used.
+The default static universe is not survivorship-bias-free. Survivorship-bias-free results require a populated point-in-time membership file from a historical constituent source such as CRSP/Compustat, WRDS, Bloomberg, or another point-in-time database. Yahoo Finance data can still have ticker gaps, missing history, and incomplete fundamentals. GDELT, Google Trends, SEC EDGAR, Black-Litterman, market-impact modeling, and TWAP/VWAP simulation are future work, not current results. Feature importance is not full SHAP unless SHAP is actually used. Selecting the best model, holding count, and weighting method on the same OOS history creates research-selection bias; a separate untouched holdout is still needed.
 
 ## 14. Future Work
 

@@ -19,7 +19,6 @@ TARGET_TYPES = [
     "Next-month outperform SPY classification",
     "Next-month cross-sectional rank percentile",
 ]
-STAGE_A2_MODEL_OPTIONS = ["Random Forest", "Gradient Boosting", "XGBoost", "LightGBM", "Decision Tree", "Elastic Net"]
 STAGE_A2_PRESENTATION_MODELS = ["Elastic Net", "Random Forest", "XGBoost"]
 STAGE_A2_PRESENTATION_CONFIG = {
     "Initial Capital": STAGE_A2_INITIAL_CAPITAL,
@@ -27,15 +26,17 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Transaction Cost Bps": 10.0,
     "Candidate Stock Holdings": [10, 15, 20],
     "Default Stock Holdings": 20,
-    "Minimum Stock Weight": MIN_STOCK_WEIGHT,
+    "Minimum Stock Weight Within Equity Sleeve": MIN_STOCK_WEIGHT,
     "Benchmark": "SPY",
     "Research Window Years": 10,
     "Target Type": "Next-month excess return vs SPY",
-    "Target Volatility": 1.0,
+    "Target Volatility": 0.10,
     "Weight Smoothing": 0.0,
     "Regime Overlay": False,
+    "Soft Drawdown Limit": 0.10,
+    "Soft Drawdown Equity Scale": 0.50,
     "Max Drawdown Guard": 0.15,
-    "Monthly Turnover Cap": 0.75,
+    "Monthly Turnover Cap": 0.50,
     "Rebalance Threshold": 0.03,
     "Research Universe Size": 200,
 }
@@ -697,6 +698,11 @@ def build_signal_diagnostics(
             }
         )
     monthly = pd.DataFrame(rows)
+    monthly_ic = monthly["Prediction IC"].dropna() if not monthly.empty else pd.Series(dtype=float)
+    ic_mean = monthly_ic.mean() if not monthly_ic.empty else np.nan
+    ic_std = monthly_ic.std(ddof=1) if len(monthly_ic) > 1 else np.nan
+    icir = ic_mean / ic_std if pd.notna(ic_std) and ic_std > 0 else np.nan
+    ic_t_stat = ic_mean / (ic_std / np.sqrt(len(monthly_ic))) if pd.notna(ic_std) and ic_std > 0 else np.nan
     summary = pd.DataFrame(
         [
             {
@@ -705,7 +711,13 @@ def build_signal_diagnostics(
                 "Average Bottom 3 Return": monthly["Bottom 3 Avg Forward Return"].mean() if not monthly.empty else np.nan,
                 "Average Bottom 5 Return": monthly["Bottom 5 Avg Forward Return"].mean() if not monthly.empty else np.nan,
                 "Average Top-Bottom 5 Spread": monthly["Top-Bottom 5 Spread"].mean() if not monthly.empty else np.nan,
-                "Average Prediction IC": monthly["Prediction IC"].mean() if not monthly.empty else np.nan,
+                "Average Prediction IC": ic_mean,
+                "Prediction IC Std Dev": ic_std,
+                "Monthly ICIR": icir,
+                "Annualized ICIR": icir * np.sqrt(12) if pd.notna(icir) else np.nan,
+                "Positive IC Month Rate": (monthly_ic > 0).mean() if not monthly_ic.empty else np.nan,
+                "IC t-stat": ic_t_stat,
+                "IC Months": len(monthly_ic),
                 "Months": len(monthly),
             }
         ]
@@ -866,60 +878,6 @@ def cluster_variance(cov: pd.DataFrame, assets: list[str]) -> float:
     return float(weights.T @ sub_cov.values @ weights)
 
 
-def ledoit_wolf_weights(returns: pd.DataFrame, scores: pd.Series) -> pd.Series:
-    from sklearn.covariance import LedoitWolf
-
-    assets = [asset for asset in scores.index if asset in returns.columns]
-    if not assets:
-        return pd.Series(dtype=float)
-    clean = returns[assets].dropna().tail(252)
-    if clean.shape[0] < 40:
-        return pd.Series(1 / len(assets), index=assets)
-    cov = LedoitWolf().fit(clean.fillna(0.0)).covariance_
-    mu = scores.loc[assets].clip(lower=0).values
-    if mu.sum() <= 0:
-        mu = np.ones(len(assets))
-    raw = np.linalg.pinv(cov) @ mu
-    raw = np.clip(raw, 0, None)
-    weights = pd.Series(raw, index=assets)
-    if weights.sum() <= 0:
-        weights = pd.Series(1 / len(assets), index=assets)
-    weights, _ = floor_and_normalize_long_weights(weights)
-    return weights
-
-
-def fractional_kelly_weights(returns: pd.DataFrame, scores: pd.Series, fraction: float) -> pd.Series:
-    assets = [asset for asset in scores.index if asset in returns.columns]
-    if not assets:
-        return pd.Series(dtype=float)
-    variance = returns[assets].tail(252).var().replace(0, np.nan)
-    raw = (scores.loc[assets].clip(lower=0) / variance).replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    if raw.sum() <= 0:
-        raw = pd.Series(1.0, index=assets)
-    weights, _ = floor_and_normalize_long_weights(raw)
-    return weights * fraction
-
-
-def beta_neutral_weights(returns: pd.DataFrame, scores: pd.Series, benchmark: str = "SPY") -> pd.Series:
-    ranked = scores.dropna().sort_values(ascending=False)
-    bucket = max(3, int(len(ranked) * 0.20))
-    longs = ranked.head(bucket).index.tolist()
-    shorts = ranked.tail(bucket).index.tolist()
-    weights = pd.Series(0.0, index=ranked.index)
-    weights[longs] = 0.5 / len(longs)
-    weights[shorts] = -0.5 / len(shorts)
-    if benchmark in returns.columns:
-        benchmark_returns = returns[benchmark].tail(252)
-        benchmark_var = benchmark_returns.var()
-        beta = returns[ranked.index].tail(252).apply(
-            lambda series: series.cov(benchmark_returns) / benchmark_var if benchmark_var > 0 else np.nan
-        )
-        portfolio_beta = float((weights * beta.reindex(weights.index).fillna(1.0)).sum())
-        if abs(portfolio_beta) > 0.05 and benchmark in weights.index:
-            weights[benchmark] = weights.get(benchmark, 0.0) - portfolio_beta
-    return weights
-
-
 def calculate_transaction_cost(weights: pd.Series, previous: pd.Series, base_bps: float) -> float:
     trade_size = (weights - previous.reindex(weights.index).fillna(0.0)).abs()
     turnover = trade_size.sum()
@@ -950,6 +908,9 @@ def apply_a2_risk_overlay(
     target_volatility: float,
     smoothing: float,
     enable_regime_overlay: bool,
+    portfolio_drawdown: float = 0.0,
+    soft_drawdown_limit: float = 0.10,
+    soft_drawdown_scale: float = 0.50,
 ) -> tuple[pd.Series, dict]:
     weights = weights.fillna(0.0)
     previous = previous_weights.reindex(weights.index).fillna(0.0)
@@ -968,13 +929,16 @@ def apply_a2_risk_overlay(
     if not enable_regime_overlay:
         regime_state, regime_scale = "Disabled", 1.0
 
-    final_scale = min(vol_scale, regime_scale)
+    drawdown_scale = soft_drawdown_scale if portfolio_drawdown <= -soft_drawdown_limit else 1.0
+    final_scale = min(vol_scale, regime_scale, drawdown_scale)
     adjusted = smoothed * final_scale
     return adjusted, {
         "Risk Overlay State": regime_state,
         "Realized Volatility": realized_vol,
         "Vol Target Scale": vol_scale,
         "Regime Scale": regime_scale,
+        "Portfolio Drawdown Before Rebalance": portfolio_drawdown,
+        "Soft Drawdown Scale": drawdown_scale,
         "Final Risk Scale": final_scale,
         "Smoothing": smoothing,
     }
@@ -984,7 +948,6 @@ def build_stage_a2_portfolios(
     close: pd.DataFrame,
     predictions: pd.Series,
     base_cost_bps: float,
-    kelly_fraction: float,
     target_volatility: float,
     smoothing: float,
     enable_regime_overlay: bool,
@@ -1047,6 +1010,8 @@ def build_stage_a2_portfolios(
         if not period_mask.any():
             continue
         for strategy_name, weights in target_weights.items():
+            current_peak = max(peak_state[strategy_name], equity_state[strategy_name])
+            current_drawdown = equity_state[strategy_name] / current_peak - 1
             weights, overlay_info = apply_a2_risk_overlay(
                 weights,
                 previous_weights[strategy_name],
@@ -1054,11 +1019,10 @@ def build_stage_a2_portfolios(
                 target_volatility,
                 smoothing,
                 enable_regime_overlay,
+                current_drawdown,
+                float(STAGE_A2_PRESENTATION_CONFIG["Soft Drawdown Limit"]),
+                float(STAGE_A2_PRESENTATION_CONFIG["Soft Drawdown Equity Scale"]),
             )
-            long_weights = weights[weights > 0]
-            if not long_weights.empty:
-                long_weights, _ = floor_and_normalize_long_weights(long_weights)
-                weights = long_weights.reindex(weights.index).fillna(0.0)
             previous = previous_weights[strategy_name].reindex(weights.index).fillna(0.0)
             requested_turnover = (weights - previous).abs().sum()
             rebalance_skipped = False
@@ -1067,6 +1031,11 @@ def build_stage_a2_portfolios(
                 rebalance_skipped = True
             elif requested_turnover > turnover_cap:
                 weights = previous + (weights - previous) * (turnover_cap / requested_turnover)
+            equity_exposure = weights.clip(lower=0).sum()
+            active_weights = weights[weights > 1e-8]
+            if not active_weights.empty and equity_exposure > 0:
+                active_weights, _ = floor_and_normalize_long_weights(active_weights)
+                weights = (active_weights * equity_exposure).reindex(weights.index).fillna(0.0)
             cost = calculate_transaction_cost(weights, previous_weights[strategy_name], base_cost_bps)
             raw_period_returns = daily_returns.loc[period_mask, weights.index].dot(weights)
             period_returns = raw_period_returns.copy()
@@ -1105,7 +1074,8 @@ def build_stage_a2_portfolios(
                     "Gross Exposure": weights.abs().sum(),
                     "Net Exposure": weights.sum(),
                     "Max Position Weight": weights.max(),
-                    "Minimum Weight Rule": "Pass" if weights[weights > 0].min() >= MIN_STOCK_WEIGHT - 1e-9 else "Fail",
+                    "Cash Weight": max(0.0, 1.0 - weights.sum()),
+                    "Minimum Weight Rule": "Pass" if weights[weights > 0].div(weights[weights > 0].sum()).min() >= MIN_STOCK_WEIGHT - 1e-9 else "Fail",
                     "Long Count": int((weights > 0).sum()),
                     "Short Count": int((weights < 0).sum()),
                     "Max Drawdown Limit": max_drawdown_limit,
@@ -1275,7 +1245,6 @@ def run_stage_a2_research(
     macro: pd.DataFrame,
     model_name: str,
     base_cost_bps: float,
-    kelly_fraction: float,
     target_volatility: float,
     smoothing: float,
     enable_regime_overlay: bool,
@@ -1357,7 +1326,6 @@ def run_stage_a2_research(
         close,
         predictions,
         base_cost_bps,
-        kelly_fraction,
         target_volatility,
         smoothing,
         enable_regime_overlay,
@@ -1520,7 +1488,6 @@ def select_stage_a2_holding_count(
             close,
             base_result[1],
             config["Transaction Cost Bps"],
-            0.25,
             config["Target Volatility"],
             config["Weight Smoothing"],
             config["Regime Overlay"],
@@ -1905,7 +1872,6 @@ def run_stage_a2_feature_subset_diagnostic(
         close,
         predictions,
         config["Transaction Cost Bps"],
-        0.25,
         config["Target Volatility"],
         0.0,
         config["Regime Overlay"],
@@ -1940,7 +1906,6 @@ def run_stage_a2_target_diagnostic(close: pd.DataFrame, macro: pd.DataFrame, mod
             macro,
             model_name,
             config["Transaction Cost Bps"],
-            0.25,
             config["Target Volatility"],
             0.0,
             config["Regime Overlay"],
@@ -2113,7 +2078,6 @@ def run_stage_a2_presentation_research(
             macro,
             model_name,
             config["Transaction Cost Bps"],
-            0.25,
             config["Target Volatility"],
             config["Weight Smoothing"],
             config["Regime Overlay"],
@@ -2122,7 +2086,7 @@ def run_stage_a2_presentation_research(
             config["Rebalance Threshold"],
             config["Target Type"],
             False,
-            collect_importance=False,
+            collect_importance=True,
             top_n=int(config["Default Stock Holdings"]),
             prediction_step=2,
             eligible_symbols=eligible_symbols,
@@ -2368,12 +2332,40 @@ def render_stage_a2_performance_diagnostics(bundle: dict) -> None:
     else:
         signal = signal_monthly.copy()
         signal["Rolling Top-Bottom 5 Spread"] = signal["Top-Bottom 5 Spread"].rolling(6).mean()
-        signal["Rolling Prediction IC"] = signal["Prediction IC"].rolling(6).mean()
-        c1, c2, c3 = st.columns(3)
+        signal["6M Rolling Prediction IC"] = signal["Prediction IC"].rolling(6, min_periods=6).mean()
+        signal["12M Rolling Prediction IC"] = signal["Prediction IC"].rolling(12, min_periods=12).mean()
+        monthly_ic = signal["Prediction IC"].dropna()
+        ic_mean = monthly_ic.mean()
+        ic_std = monthly_ic.std(ddof=1)
+        monthly_icir = ic_mean / ic_std if pd.notna(ic_std) and ic_std > 0 else np.nan
+        annualized_icir = monthly_icir * np.sqrt(12) if pd.notna(monthly_icir) else np.nan
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Avg Top-Bottom 5 Spread", f"{signal['Top-Bottom 5 Spread'].mean():.2%}")
         c2.metric("Positive Spread Hit Rate", f"{(signal['Top-Bottom 5 Spread'] > 0).mean():.1%}")
         c3.metric("Avg Prediction IC", f"{signal['Prediction IC'].mean():.3f}")
-        st.plotly_chart(px.line(signal, x="Date", y=["Rolling Top-Bottom 5 Spread", "Rolling Prediction IC"], title="Rolling ML Signal Quality"), use_container_width=True, key="a2_diag_signal_quality")
+        c4.metric("Positive IC Months", f"{(monthly_ic > 0).mean():.1%}")
+        c5.metric("Annualized ICIR", f"{annualized_icir:.2f}" if pd.notna(annualized_icir) else "N/A")
+        st.caption(
+            f"Monthly IC standard deviation: {ic_std:.3f}. Monthly ICIR: {monthly_icir:.2f}. "
+            "IC is the monthly cross-sectional Spearman correlation between predicted ranks and realized next-month returns."
+            if pd.notna(ic_std) and pd.notna(monthly_icir)
+            else "IC stability requires at least two valid monthly cross-sections."
+        )
+        st.plotly_chart(
+            px.line(
+                signal,
+                x="Date",
+                y=["6M Rolling Prediction IC", "12M Rolling Prediction IC"],
+                title="Rolling Rank IC Stability",
+            ),
+            use_container_width=True,
+            key="a2_diag_ic_stability",
+        )
+        st.plotly_chart(
+            px.line(signal, x="Date", y="Rolling Top-Bottom 5 Spread", title="Rolling Top-Bottom Spread"),
+            use_container_width=True,
+            key="a2_diag_spread_stability",
+        )
         st.dataframe(
             signal[["Date", "Top 3 Avg Forward Return", "Top 5 Avg Forward Return", "Bottom 3 Avg Forward Return", "Bottom 5 Avg Forward Return", "Top-Bottom 5 Spread", "Prediction IC"]].tail(36).style.format(
                 {
@@ -2548,8 +2540,10 @@ def render_stage_a2_current_portfolio(bundle: dict) -> None:
     st.plotly_chart(px.bar(sector_exposure, x="Category", y="Weight", title="Current Sector Exposure"), use_container_width=True, key="a2_current_sector_exposure")
     if not sector_exposure.empty and sector_exposure["Weight"].max() > 0.25:
         st.warning("Sector concentration warning: one sector exceeds the 25% guideline.")
-    if holdings["Weight"].abs().min() < MIN_STOCK_WEIGHT - 1e-9:
-        st.warning("One or more stock weights are below the 5% minimum stock weight rule.")
+    invested_weight = holdings["Weight"].clip(lower=0).sum()
+    if invested_weight > 0 and (holdings["Weight"].clip(lower=0) / invested_weight).min() < MIN_STOCK_WEIGHT - 1e-9:
+        st.warning("One or more positions are below 5% of the invested equity sleeve.")
+    st.metric("Cash Weight", f"{max(0.0, 1.0 - invested_weight):.2%}")
     if holdings["Weight"].abs().head(3).sum() > 0.75:
         st.warning("Portfolio is concentrated: top three absolute weights exceed 75%.")
     if diagnostics.get("Prediction Source") == "Fallback":
@@ -2674,7 +2668,7 @@ def render_stage_a2_risk_dashboard(bundle: dict) -> None:
     equity = (1 + returns).cumprod()
     st.plotly_chart(px.line((equity / equity.cummax() - 1).to_frame("Rolling Drawdown"), title="Rolling Drawdown"), use_container_width=True, key="a2_risk_rolling_drawdown")
     if not execution.empty and "Minimum Weight Rule" in execution and execution["Minimum Weight Rule"].eq("Fail").any():
-        st.warning("Minimum weight warning: at least one historical rebalance fell below the 5% stock weight rule.")
+        st.warning("Minimum weight warning: at least one rebalance fell below 5% of the invested equity sleeve.")
     if not execution.empty:
         st.metric("Total Transaction Cost Estimate", f"{execution.loc[execution['Portfolio'].eq(recommended), 'Transaction Cost'].sum():.2%}")
 
@@ -2693,70 +2687,6 @@ def render_stage_a2_stress_tests(bundle: dict) -> None:
     st.dataframe(stress.style.format({key: value for key, value in format_map.items() if key in stress.columns}), use_container_width=True, hide_index=True)
 
 
-def render_stage_a2_live_monitor(bundle: dict) -> None:
-    result = bundle["selected_result"]
-    recommended = bundle["recommended_method"]
-    benchmark = bundle["benchmark"]
-    holdings = bundle["current_holdings"]
-    today = pd.Timestamp.today().normalize()
-    requested_start = pd.Timestamp(year=today.year, month=6, day=1)
-    returns = result[4][recommended].dropna()
-    live_returns = returns.loc[returns.index >= requested_start]
-    if live_returns.empty:
-        st.warning(f"No live-period return rows are available from {requested_start.date()} to {today.date()}. This can happen if Yahoo has not returned current-month bars yet.")
-        return
-    live_start = live_returns.index.min()
-    live_end = live_returns.index.max()
-    spy_live = benchmark.reindex(live_returns.index).fillna(0.0) if benchmark is not None else pd.Series(dtype=float)
-    strategy_equity = (1 + live_returns).cumprod()
-    spy_equity = (1 + spy_live).cumprod() if not spy_live.empty else pd.Series(dtype=float)
-    strategy_total = strategy_equity.iloc[-1] - 1
-    spy_total = spy_equity.iloc[-1] - 1 if not spy_equity.empty else np.nan
-    live_value = STAGE_A2_INITIAL_CAPITAL * strategy_equity.iloc[-1]
-    live_drawdown = strategy_equity / strategy_equity.cummax() - 1
-
-    st.subheader(f"Live Monitor: {requested_start.date()} to {today.date()}")
-    st.caption(
-        "This is a live-ish research monitor using the latest Yahoo Finance daily bars available to the app. "
-        "It is not broker-confirmed execution P&L."
-    )
-    cols = st.columns(5)
-    cols[0].metric("Recommended Method", recommended)
-    cols[1].metric("Live Portfolio Value", f"${live_value:,.0f}")
-    cols[2].metric("Strategy Return", f"{strategy_total:.2%}")
-    cols[3].metric("SPY Return", f"{spy_total:.2%}" if pd.notna(spy_total) else "N/A")
-    cols[4].metric("Live Max Drawdown", f"{live_drawdown.min():.2%}")
-    if pd.notna(spy_total):
-        st.info(
-            f"From {live_start.date()} to {live_end.date()}, Stage A2 returned {strategy_total:.2%} "
-            f"versus SPY {spy_total:.2%}. Difference: {strategy_total - spy_total:.2%}."
-        )
-
-    live_curve = pd.DataFrame({"Stage A2": strategy_equity * STAGE_A2_INITIAL_CAPITAL})
-    if not spy_equity.empty:
-        live_curve["SPY"] = spy_equity * STAGE_A2_INITIAL_CAPITAL
-    st.plotly_chart(px.line(live_curve, title="$1,000,000 Live-Period Equity Curve"), use_container_width=True, key="a2_live_equity")
-    st.plotly_chart(px.line(live_drawdown.to_frame("Stage A2 Drawdown"), title="Live-Period Drawdown"), use_container_width=True, key="a2_live_drawdown")
-
-    st.subheader("Current Recommended Holdings")
-    if holdings.empty:
-        st.warning("Current holdings are unavailable.")
-    else:
-        st.dataframe(
-            holdings[["Ticker", "Weight", "Category", "ML Rank", "Prediction Score", "Reason / Top Drivers"]].style.format(
-                {"Weight": "{:.2%}", "Prediction Score": "{:.4f}"}
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-    daily = pd.DataFrame({"Stage A2 Daily Return": live_returns})
-    if not spy_live.empty:
-        daily["SPY Daily Return"] = spy_live
-        daily["Excess vs SPY"] = daily["Stage A2 Daily Return"] - daily["SPY Daily Return"]
-    st.subheader("Live Daily Returns")
-    st.dataframe(daily.tail(30).style.format("{:.2%}"), use_container_width=True)
-
-
 def render_stage_a2_methodology(bundle: dict) -> None:
     st.markdown(
         """
@@ -2764,19 +2694,22 @@ def render_stage_a2_methodology(bundle: dict) -> None:
 Stage A2 is a white-box ML long-only stock selection strategy. It ranks stocks monthly, validates predictions walk-forward, selects a holding count, and converts the ranking into portfolio weights.
 
 ### ML Stock Ranking
-The model scores each stock using momentum, relative strength, volatility, drawdown, trend, beta, correlation, regime, and lagged macro features. The default target is next-month stock return.
+The model scores each stock using momentum, relative strength, volatility, drawdown, trend, beta, correlation, regime, and lagged macro features. The target is next-month excess return versus SPY.
 
 ### Walk-Forward Validation
 Each prediction month trains only on data before that month. Forward returns use `shift(-1)` only to build training targets, not prediction-time features.
 
 ### Selection Rules
-The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The holding count is selected from 10/15/20 stocks so every position can remain at or above the 5% minimum. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
+The selected model is chosen by walk-forward OOS Sharpe, with lower drawdown, positive top-minus-bottom spread, and lower turnover as tie-breakers. The holding count is selected from 10/15/20 stocks. Each name is at least 5% of the invested equity sleeve; volatility and drawdown controls may leave the remainder in cash. The portfolio method is chosen by OOS Sharpe, then drawdown, turnover, and cost drag.
 
 ### Portfolio Methods
 Equal Weight Top N is the simple baseline. Score Weighted Top N gives larger weights to stronger ML scores while enforcing the 5% minimum position rule. Inverse-Vol / Risk-Parity Style Top N gives more weight to lower-volatility names while also enforcing the 5% minimum.
 
+### Risk Controls
+The portfolio targets 10% annualized volatility using only information available at each rebalance. At a 10% portfolio drawdown, equity exposure is reduced to at most 50%; the existing 15% hard guard remains an idealized research stop and is disclosed separately. The regime chart is diagnostic unless the rule-based regime overlay is explicitly enabled.
+
 ### Current Limitations
-This uses the local stock universe file rather than full point-in-time Russell 3000 / MSCI ACWI constituent coverage. FRED macro features may be included, but GDELT, Google Trends, and SEC EDGAR are not fully implemented in this Stage A2 dashboard. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. Black-Litterman and full TWAP/VWAP simulation are not implemented yet. ML may underperform simple strategies, and this dashboard reports that transparently.
+This uses the local stock universe file rather than full point-in-time Russell 3000 / MSCI ACWI constituent coverage. GDELT, Google Trends, SEC EDGAR, Black-Litterman, market-impact modeling, and TWAP/VWAP simulation are future work, not current results. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. ML may underperform simple strategies, and this dashboard reports that transparently.
 """
     )
     config_rows = [{"Setting": key, "Value": value} for key, value in bundle["config"].items()]
@@ -2832,7 +2765,6 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     tabs = st.tabs(
         [
             "Executive Overview",
-            "Live Monitor",
             "Performance Diagnostics",
             "Portfolio Performance",
             "Current Portfolio",
@@ -2847,24 +2779,22 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     with tabs[0]:
         render_stage_a2_executive_overview(bundle)
     with tabs[1]:
-        render_stage_a2_live_monitor(bundle)
-    with tabs[2]:
         render_stage_a2_performance_diagnostics(bundle)
-    with tabs[3]:
+    with tabs[2]:
         render_stage_a2_portfolio_performance(bundle)
-    with tabs[4]:
+    with tabs[3]:
         render_stage_a2_current_portfolio(bundle)
-    with tabs[5]:
+    with tabs[4]:
         render_stage_a2_model_selection(bundle)
-    with tabs[6]:
+    with tabs[5]:
         render_stage_a2_portfolio_comparison(bundle)
-    with tabs[7]:
+    with tabs[6]:
         render_stage_a2_white_box_explanation(bundle)
-    with tabs[8]:
+    with tabs[7]:
         render_stage_a2_risk_dashboard(bundle)
-    with tabs[9]:
+    with tabs[8]:
         render_stage_a2_stress_tests(bundle)
-    with tabs[10]:
+    with tabs[9]:
         render_stage_a2_methodology(bundle)
 
     with st.expander("Advanced Research Details", expanded=False):
