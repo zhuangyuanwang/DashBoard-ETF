@@ -41,8 +41,8 @@ Stage A2 ranks stocks each month by predicted next-month excess return versus SP
 The dashboard automatically:
 
 - Runs Elastic Net, Random Forest, and XGBoost as the presentation model set.
-- Ranks the first 200 tickers from `data/stock_universe.csv` by default, plus SPY and risk-proxy ETFs for features and benchmarking.
-- Supports an optional point-in-time universe file at `data/stock_universe_point_in_time.csv` with `Ticker`, `StartDate`, and `EndDate` columns to avoid using stocks before they entered the investable universe or after they exited.
+- Uses a point-in-time S&P 500 membership file at `data/stock_universe_point_in_time.csv`; it does not arbitrarily truncate the universe to the first 200 names.
+- Requires complete historical price coverage for every eligible constituent at every signal date. If a delisted or historical constituent is missing from the price feed, the formal backtest stops instead of silently dropping the name.
 - Selects the model by OOS Sharpe, then drawdown, signal spread, and turnover.
 - Selects the number of stocks to hold from 10, 15, or 20 using walk-forward OOS diagnostics, because a 5% minimum position rule implies at most 20 holdings.
 - Compares Equal Weight Top N, Score Weighted Top N, and Inverse-Vol / Risk-Parity Style Top N while keeping every name at least 5% of the invested equity sleeve.
@@ -81,8 +81,8 @@ Current reasons Stage A2 ML may underperform simple ETF momentum strategies:
 
 ## Limitations and Fallbacks
 
-- The default `stock_universe.csv` is a static research universe. Survivorship-bias-free results require a populated `data/stock_universe_point_in_time.csv` file from a historical constituent source such as CRSP/Compustat, WRDS, Bloomberg, or another point-in-time membership database.
-- Yahoo Finance and FRED data can have missing values, revisions, ticker gaps, and delayed updates.
+- `scripts/build_sp500_point_in_time_universe.py` builds a candidate S&P 500 membership file from a public historical-constituent dataset. Strict mode validates that every monthly snapshot contains 490-510 names. The bundled free source currently fails that completeness check in part of the requested period, so it is useful for pipeline testing but cannot produce a formal result.
+- Yahoo Finance is not a delisting-aware price database. Strict mode intentionally blocks a formal run when Yahoo lacks any required historical constituent. To produce a completed survivorship-bias-controlled result, replace Yahoo prices with CRSP, Norgate, Bloomberg, WRDS/Compustat, or another source containing delisting returns and permanent-security identifiers.
 - A2 regime detection uses a true 3-state Gaussian HMM when `hmmlearn` is installed. Otherwise it is clearly labeled as a Gaussian-mixture regime proxy.
 - A2 inverse-vol / risk-parity style weighting is a simplified risk allocation method, not a full institutional HRP implementation.
 - A2 can fall back from the requested ML model to a simpler model or a white-box momentum/risk score if the selected model cannot produce enough walk-forward predictions.

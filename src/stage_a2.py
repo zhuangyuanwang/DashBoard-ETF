@@ -38,7 +38,10 @@ STAGE_A2_PRESENTATION_CONFIG = {
     "Max Drawdown Guard": 0.15,
     "Monthly Turnover Cap": 0.50,
     "Rebalance Threshold": 0.03,
-    "Research Universe Size": 200,
+    "Require Point-in-Time Universe": True,
+    "Require Complete Point-in-Time Price Coverage": True,
+    "Minimum Constituents per Snapshot": 490,
+    "Maximum Constituents per Snapshot": 510,
 }
 ASSET_CATEGORY_MAP = {
     **{symbol: "Sector ETF" for symbol in SECTOR_ETFS},
@@ -90,7 +93,12 @@ DEFAULT_A2_STOCKS = [
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_stage_a2_prices(symbols: tuple[str, ...], start_date: str, end_date: str) -> pd.DataFrame:
+def load_stage_a2_prices(
+    symbols: tuple[str, ...],
+    start_date: str,
+    end_date: str,
+    preserve_partial_history: bool = False,
+) -> pd.DataFrame:
     data = yf.download(
         list(symbols),
         start=start_date,
@@ -106,8 +114,10 @@ def load_stage_a2_prices(symbols: tuple[str, ...], start_date: str, end_date: st
     if isinstance(close, pd.Series):
         close = close.to_frame(name=symbols[0])
     close = close.dropna(how="all")
-    missing_ratio = close.isna().mean()
-    close = close.loc[:, missing_ratio <= 0.25].ffill(limit=5).dropna(how="all")
+    if not preserve_partial_history:
+        missing_ratio = close.isna().mean()
+        close = close.loc[:, missing_ratio <= 0.25]
+    close = close.ffill(limit=5).dropna(how="all")
     return close.loc[:, ~close.columns.duplicated()].sort_index()
 
 
@@ -191,6 +201,69 @@ def filter_panel_to_point_in_time_universe(
     filtered_y = y.reindex(keep_index)
     valid_index = filtered_y[filtered_y.notna()].index
     return x.loc[valid_index], filtered_y.loc[valid_index], forward_returns.reindex(valid_index)
+
+
+def point_in_time_price_coverage_report(
+    close: pd.DataFrame,
+    point_in_time_universe: pd.DataFrame,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    required_history_days: int = 252,
+) -> pd.DataFrame:
+    """Check that every historically eligible name has usable pre-signal prices.
+
+    A strict point-in-time backtest must not quietly discard delisted or missing
+    names, because doing so reintroduces survivorship bias through the data feed.
+    """
+    pit = normalize_point_in_time_universe(point_in_time_universe)
+    if pit.empty or close.empty:
+        return pd.DataFrame()
+    signal_dates = pd.date_range(pd.to_datetime(start_date), pd.to_datetime(end_date), freq="ME")
+    rows = []
+    for signal_date in signal_dates:
+        active = active_point_in_time_symbols(pit, signal_date)
+        if not active:
+            continue
+        available = set()
+        for ticker in active.intersection(close.columns):
+            history = close.loc[close.index <= signal_date, ticker].dropna()
+            if len(history) >= required_history_days and history.index.max() >= signal_date - pd.Timedelta(days=7):
+                available.add(ticker)
+        missing = sorted(active - available)
+        rows.append(
+            {
+                "Signal Date": signal_date,
+                "Required Constituents": len(active),
+                "Price-Covered Constituents": len(available),
+                "Coverage Ratio": len(available) / len(active),
+                "Missing Tickers": ", ".join(missing),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def point_in_time_membership_report(
+    point_in_time_universe: pd.DataFrame,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    minimum_constituents: int = 490,
+    maximum_constituents: int = 510,
+) -> pd.DataFrame:
+    """Validate that the membership source is complete before requesting prices."""
+    pit = normalize_point_in_time_universe(point_in_time_universe)
+    if pit.empty:
+        return pd.DataFrame()
+    rows = []
+    for signal_date in pd.date_range(pd.to_datetime(start_date), pd.to_datetime(end_date), freq="ME"):
+        count = len(active_point_in_time_symbols(pit, signal_date))
+        rows.append(
+            {
+                "Signal Date": signal_date,
+                "Historical Constituents": count,
+                "Membership Complete": minimum_constituents <= count <= maximum_constituents,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def build_stage_a2_features(
@@ -2709,7 +2782,7 @@ Equal Weight Top N is the simple baseline. Score Weighted Top N gives larger wei
 The portfolio targets 10% annualized volatility using only information available at each rebalance. At a 10% portfolio drawdown, equity exposure is reduced to at most 50%; the existing 15% hard guard remains an idealized research stop and is disclosed separately. The regime chart is diagnostic unless the rule-based regime overlay is explicitly enabled.
 
 ### Current Limitations
-This uses the local stock universe file rather than full point-in-time Russell 3000 / MSCI ACWI constituent coverage. GDELT, Google Trends, SEC EDGAR, Black-Litterman, market-impact modeling, and TWAP/VWAP simulation are future work, not current results. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. ML may underperform simple strategies, and this dashboard reports that transparently.
+Formal results require a complete point-in-time membership file and complete delisting-aware price data. The bundled public S&P 500 membership candidate is validated but currently fails the completeness gate in part of the history; the dashboard blocks a formal run rather than reverting to a static survivor universe. GDELT, Google Trends, SEC EDGAR, Black-Litterman, market-impact modeling, and TWAP/VWAP simulation are future work, not current results. Feature importance is not full SHAP unless SHAP is actually used. Regime detection is HMM only when `hmmlearn` is available; otherwise it is a proxy. ML may underperform simple strategies, and this dashboard reports that transparently.
 """
     )
     config_rows = [{"Setting": key, "Value": value} for key, value in bundle["config"].items()]
@@ -2721,38 +2794,85 @@ def render_stage_a2_dashboard(stock_universe_file) -> None:
     st.caption("Presentation-focused dashboard: the system compares models and portfolio methods automatically using walk-forward OOS validation.")
 
     config = STAGE_A2_PRESENTATION_CONFIG
-    end_date = pd.Timestamp.today().normalize()
-    start_date = end_date - pd.DateOffset(years=int(config["Research Window Years"]))
+    requested_end_date = pd.Timestamp.today().normalize()
     universe_table = pd.read_csv(stock_universe_file) if stock_universe_file.exists() else pd.DataFrame()
     pit_file = stock_universe_file.with_name("stock_universe_point_in_time.csv")
-    pit_source = pd.read_csv(pit_file) if pit_file.exists() else universe_table
+    pit_source = pd.read_csv(pit_file) if pit_file.exists() else pd.DataFrame()
     point_in_time_universe = normalize_point_in_time_universe(pit_source)
+    if point_in_time_universe.empty and config["Require Point-in-Time Universe"]:
+        st.error(
+            "Formal Stage A2 results require data/stock_universe_point_in_time.csv. "
+            "The static stock list is intentionally blocked because it has survivorship bias."
+        )
+        return
+    coverage_end = pd.to_datetime(pit_source.get("CoverageEnd", pd.Series(dtype=object)), errors="coerce").dropna()
+    end_date = min(requested_end_date, coverage_end.min()) if not coverage_end.empty else requested_end_date
+    start_date = end_date - pd.DateOffset(years=int(config["Research Window Years"]))
     if not point_in_time_universe.empty:
         overlap = point_in_time_universe[
             (point_in_time_universe["StartDate"] <= end_date)
             & (point_in_time_universe["EndDate"].isna() | (point_in_time_universe["EndDate"] >= start_date))
         ]
-        stock_symbols = tuple(overlap["Ticker"].dropna().astype(str).str.upper().drop_duplicates().head(int(config["Research Universe Size"])).tolist())
+        stock_symbols = tuple(overlap["Ticker"].dropna().astype(str).str.upper().drop_duplicates().tolist())
         sector_map = overlap.set_index("Ticker")["Sector"].dropna().to_dict() if "Sector" in overlap else {}
     elif "Ticker" in universe_table:
-        stock_symbols = tuple(universe_table["Ticker"].dropna().astype(str).str.upper().head(int(config["Research Universe Size"])).tolist())
+        stock_symbols = tuple(universe_table["Ticker"].dropna().astype(str).str.upper().tolist())
         sector_map = universe_table.set_index("Ticker")["Sector"].dropna().to_dict() if "Sector" in universe_table else {}
     else:
         stock_symbols = tuple(DEFAULT_A2_STOCKS)
         sector_map = {}
     ASSET_CATEGORY_MAP.update({str(ticker).upper(): sector for ticker, sector in sector_map.items()})
+    if not point_in_time_universe.empty:
+        membership_report = point_in_time_membership_report(
+            point_in_time_universe,
+            start_date,
+            end_date,
+            int(config["Minimum Constituents per Snapshot"]),
+            int(config["Maximum Constituents per Snapshot"]),
+        )
+        incomplete_membership = membership_report[~membership_report["Membership Complete"]] if not membership_report.empty else pd.DataFrame()
+        if not incomplete_membership.empty:
+            first_gap = incomplete_membership.iloc[0]
+            st.error(
+                "Formal backtest blocked: the point-in-time membership source is incomplete. "
+                f"It has {int(first_gap['Historical Constituents'])} constituents on {first_gap['Signal Date'].date()}, "
+                "outside the expected S&P 500 range of 490-510."
+            )
+            st.dataframe(incomplete_membership.head(24), use_container_width=True, hide_index=True)
+            return
     risk_proxy_symbols = tuple(symbol for symbol in GLOBAL_PROXIES + SECTOR_ETFS if symbol not in stock_symbols)
     selected_symbols = tuple(dict.fromkeys([*stock_symbols, *risk_proxy_symbols]))
 
     with st.spinner("Loading stock prices, risk proxies, and FRED macro data..."):
-        close = load_stage_a2_prices(selected_symbols, start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
+        close = load_stage_a2_prices(
+            selected_symbols,
+            start_date.strftime("%Y-%m-%d"),
+            end_date.strftime("%Y-%m-%d"),
+            preserve_partial_history=bool(config["Require Complete Point-in-Time Price Coverage"]),
+        )
         macro = load_fred_macro(start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d"))
     eligible_symbols = tuple(symbol for symbol in stock_symbols if symbol in close.columns)
     if close.empty or len(eligible_symbols) < 30:
         st.error("Not enough stock data loaded for Stage A2 long-only stock selection.")
         return
     if not point_in_time_universe.empty:
-        st.success("Point-in-time universe mode is active: model training and portfolio selection use only stocks active as of each signal date.")
+        coverage_report = point_in_time_price_coverage_report(close, point_in_time_universe, start_date, end_date)
+        missing_coverage = coverage_report[coverage_report["Coverage Ratio"] < 1.0] if not coverage_report.empty else pd.DataFrame()
+        if config["Require Complete Point-in-Time Price Coverage"] and not missing_coverage.empty:
+            first_gap = missing_coverage.iloc[0]
+            st.error(
+                "Formal backtest blocked: Yahoo Finance lacks complete price history for the historical point-in-time universe. "
+                f"On {first_gap['Signal Date'].date()}, {int(first_gap['Required Constituents'] - first_gap['Price-Covered Constituents'])} "
+                "required constituents have insufficient history. Use CRSP, Norgate, Bloomberg, or another delisting-aware price source."
+            )
+            st.dataframe(missing_coverage.head(24), use_container_width=True, hide_index=True)
+            return
+        st.success(
+            "Strict point-in-time universe mode is active: each signal uses only stocks that were S&P 500 constituents on that date, "
+            "and all required historical constituents passed the price-coverage check."
+        )
+        if end_date < requested_end_date:
+            st.caption(f"Research end date is capped at {end_date.date()} because that is the last verified membership snapshot in the local source.")
     else:
         st.warning("Static research universe mode is active. To avoid survivorship bias, add data/stock_universe_point_in_time.csv with Ticker, StartDate, and EndDate columns.")
 
